@@ -162,6 +162,10 @@ Used by [weave](https://github.com/Ataraxy-Labs/weave) (semantic merge driver) a
 - **xxhash** for structural hashing
 - Plugin system for adding new languages and formats
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Ataraxy-Labs/sem&type=Date)](https://star-history.com/#Ataraxy-Labs/sem&Date)
+
 ## License
 
 MIT OR Apache-2.0
