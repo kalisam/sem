@@ -239,6 +239,8 @@ fn trim_trailing_blanks(lines: &[&str], start: usize, next_start: usize) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::change::ChangeType;
+    use crate::model::identity::match_entities;
 
     #[test]
     fn test_json_line_positions() {
@@ -273,6 +275,19 @@ mod tests {
         assert_eq!(entities[3].name, "description");
         assert_eq!(entities[3].start_line, 8);
         assert_eq!(entities[3].end_line, 8);
+    }
+
+    #[test]
+    fn test_rename_detected_end_to_end() {
+        let before_content = "{\n  \"timeout\": 30\n}\n";
+        let after_content = "{\n  \"request_timeout\": 30\n}\n";
+        let plugin = JsonParserPlugin;
+        let before = plugin.extract_entities(before_content, "config.json");
+        let after = plugin.extract_entities(after_content, "config.json");
+        let result = match_entities(&before, &after, "config.json", None, None, None);
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].change_type, ChangeType::Renamed);
+        assert_eq!(result.changes[0].entity_name, "request_timeout");
     }
 
     #[test]
