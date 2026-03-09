@@ -18,6 +18,7 @@ pub fn extract_entities(
         &mut entities,
         None,
         source_code.as_bytes(),
+        None,
     );
     entities
 }
@@ -29,6 +30,7 @@ fn visit_node(
     entities: &mut Vec<SemanticEntity>,
     parent_id: Option<&str>,
     source: &[u8],
+    enclosing_entity_node_type: Option<&'static str>,
 ) {
     let node_type = node.kind();
 
@@ -68,6 +70,7 @@ fn visit_node(
                             entities,
                             Some(&entity_id),
                             source,
+                            enclosing_entity_node_type,
                         );
                     }
                 }
@@ -78,57 +81,63 @@ fn visit_node(
 
     if config.entity_node_types.contains(&node_type) {
         if let Some(name) = extract_name(node, source) {
+            let name = qualify_hcl_name(&name, node_type, parent_id, enclosing_entity_node_type);
             let entity_type = if node_type == "decorated_definition" {
                 map_decorated_type(node)
             } else {
                 map_node_type(node_type)
             };
-            let content_str = node_text(node, source);
-            let content = content_str.to_string();
+            let should_skip = should_skip_entity(config, enclosing_entity_node_type, node_type);
+            if !should_skip {
+                let content_str = node_text(node, source);
+                let content = content_str.to_string();
 
-            let struct_hash = structural_hash(node, source);
-            let entity = SemanticEntity {
-                id: build_entity_id(file_path, entity_type, &name, parent_id),
-                file_path: file_path.to_string(),
-                entity_type: entity_type.to_string(),
-                name: name.clone(),
-                parent_id: parent_id.map(String::from),
-                content_hash: content_hash(&content),
-                structural_hash: Some(struct_hash),
-                content,
-                start_line: node.start_position().row + 1,
-                end_line: node.end_position().row + 1,
-                metadata: None,
-            };
+                let struct_hash = structural_hash(node, source);
+                let entity = SemanticEntity {
+                    id: build_entity_id(file_path, entity_type, &name, parent_id),
+                    file_path: file_path.to_string(),
+                    entity_type: entity_type.to_string(),
+                    name: name.clone(),
+                    parent_id: parent_id.map(String::from),
+                    content_hash: content_hash(&content),
+                    structural_hash: Some(struct_hash),
+                    content,
+                    start_line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
+                    metadata: None,
+                };
 
-            let entity_id = entity.id.clone();
-            entities.push(entity);
+                let entity_id = entity.id.clone();
+                entities.push(entity);
 
-            // Visit children for nested entities (methods inside classes, etc.)
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if config.container_node_types.contains(&child.kind()) {
-                    let mut inner_cursor = child.walk();
-                    for nested in child.named_children(&mut inner_cursor) {
-                        visit_node(
-                            nested,
-                            file_path,
-                            config,
-                            entities,
-                            Some(&entity_id),
-                            source,
-                        );
+                // Visit children for nested entities (methods inside classes, etc.)
+                let next_enclosing_entity_node_type = Some(node_type);
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if config.container_node_types.contains(&child.kind()) {
+                        let mut inner_cursor = child.walk();
+                        for nested in child.named_children(&mut inner_cursor) {
+                            visit_node(
+                                nested,
+                                file_path,
+                                config,
+                                entities,
+                                Some(&entity_id),
+                                source,
+                                next_enclosing_entity_node_type,
+                            );
+                        }
                     }
                 }
+                return;
             }
-            return;
         }
     }
 
     // For export statements, look inside for the actual declaration
     if node_type == "export_statement" {
         if let Some(declaration) = node.child_by_field_name("declaration") {
-            visit_node(declaration, file_path, config, entities, parent_id, source);
+            visit_node(declaration, file_path, config, entities, parent_id, source, enclosing_entity_node_type);
             return;
         }
     }
@@ -136,7 +145,15 @@ fn visit_node(
     // Recurse into top-level children
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit_node(child, file_path, config, entities, parent_id, source);
+        visit_node(
+            child,
+            file_path,
+            config,
+            entities,
+            parent_id,
+            source,
+            enclosing_entity_node_type,
+        );
     }
 }
 
@@ -225,7 +242,10 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
     }
 
     // For C struct/enum/union specifiers, try the 'name' field
-    if node_type == "struct_specifier" || node_type == "enum_specifier" || node_type == "union_specifier" {
+    if node_type == "struct_specifier"
+        || node_type == "enum_specifier"
+        || node_type == "union_specifier"
+    {
         if let Some(name_node) = node.child_by_field_name("name") {
             return Some(node_text(name_node, source).to_string());
         }
@@ -235,6 +255,25 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
     if node_type == "type_definition" {
         if let Some(declarator) = node.child_by_field_name("declarator") {
             return extract_declarator_name(declarator, source);
+        }
+    }
+
+    // For HCL blocks, combine block type with labels (e.g., resource.cloudflare_record.dns)
+    if node_type == "block" {
+        let mut parts = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            match child.kind() {
+                "identifier" => parts.push(node_text(child, source).to_string()),
+                "string_lit" => {
+                    let text = node_text(child, source);
+                    parts.push(text.trim_matches('"').to_string());
+                }
+                _ => break, // stop at body or other non-label nodes
+            }
+        }
+        if !parts.is_empty() {
+            return Some(parts.join("."));
         }
     }
 
@@ -249,6 +288,40 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
     None
 }
 
+// Prefix nested HCL block names with their parent entity name for flat output.
+fn qualify_hcl_name(
+    name: &str,
+    node_type: &str,
+    parent_id: Option<&str>,
+    enclosing_entity_node_type: Option<&'static str>,
+) -> String {
+    if node_type != "block" || enclosing_entity_node_type != Some("block") {
+        return name.to_string();
+    }
+
+    match parent_id.and_then(parent_entity_name_from_id) {
+        Some(parent_name) => format!("{parent_name}.{name}"),
+        None => name.to_string(),
+    }
+}
+
+// Extract the entity name portion from an entity id.
+fn parent_entity_name_from_id(parent_id: &str) -> Option<&str> {
+    parent_id.rsplit("::").next()
+}
+
+// Apply language-specific nested entity suppression rules from config.
+fn should_skip_entity(
+    config: &LanguageConfig,
+    enclosing_entity_node_type: Option<&'static str>,
+    node_type: &str,
+) -> bool {
+    config.suppressed_nested_entities.iter().any(|rule| {
+        enclosing_entity_node_type == Some(rule.parent_entity_node_type)
+            && node_type == rule.child_entity_node_type
+    })
+}
+
 /// Extract the name from a C declarator (handles pointer_declarator, function_declarator, etc.)
 fn extract_declarator_name(node: Node, source: &[u8]) -> Option<String> {
     match node.kind() {
@@ -257,12 +330,16 @@ fn extract_declarator_name(node: Node, source: &[u8]) -> Option<String> {
             // For C++ qualified names like ClassName::method, return the full qualified name
             Some(node_text(node, source).to_string())
         }
-        "pointer_declarator" | "function_declarator" | "array_declarator" | "parenthesized_declarator" => {
+        "pointer_declarator"
+        | "function_declarator"
+        | "array_declarator"
+        | "parenthesized_declarator" => {
             if let Some(inner) = node.child_by_field_name("declarator") {
                 extract_declarator_name(inner, source)
             } else {
                 let mut cursor = node.walk();
-                let result = node.named_children(&mut cursor)
+                let result = node
+                    .named_children(&mut cursor)
                     .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
                     .map(|c| node_text(c, source).to_string());
                 result
@@ -273,7 +350,8 @@ fn extract_declarator_name(node: Node, source: &[u8]) -> Option<String> {
                 return Some(node_text(name, source).to_string());
             }
             let mut cursor = node.walk();
-            let result = node.named_children(&mut cursor)
+            let result = node
+                .named_children(&mut cursor)
                 .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
                 .map(|c| node_text(c, source).to_string());
             result
@@ -338,13 +416,10 @@ fn extract_call_entity(node: Node, config: &LanguageConfig, source: &[u8]) -> Op
 
     // Get arguments node (child by kind, not field name)
     let mut cursor = node.walk();
-    let args = node.named_children(&mut cursor)
-        .find(|c| c.kind() == "arguments")?;
+    let args = node.named_children(&mut cursor).find(|c| c.kind() == "arguments")?;
 
     let name = match keyword {
-        "defmodule" | "defprotocol" => {
-            extract_first_alias_or_identifier(args, source)?
-        }
+        "defmodule" | "defprotocol" => extract_first_alias_or_identifier(args, source)?,
         "defimpl" => {
             let base = extract_first_alias_or_identifier(args, source)?;
             if let Some(target) = extract_keyword_value(args, "for", source) {

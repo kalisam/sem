@@ -423,4 +423,50 @@ function outer() {
 
         assert!(names.contains(&"outer"), "got: {:?}", names);
     }
+
+    #[test]
+    fn test_hcl_entity_extraction() {
+        let code = r#"
+region = "eu-west-1"
+
+variable "image_id" {
+  type = string
+}
+
+resource "aws_instance" "web" {
+  ami = var.image_id
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+"#;
+        let plugin = CodeParserPlugin;
+        let entities = plugin.extract_entities(code, "main.tf");
+        let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+        let types: Vec<&str> = entities.iter().map(|e| e.entity_type.as_str()).collect();
+        eprintln!("HCL entities: {:?}", entities.iter().map(|e| (&e.name, &e.entity_type, &e.parent_id)).collect::<Vec<_>>());
+
+        assert!(names.contains(&"region"), "Should find top-level attribute, got: {:?}", names);
+        assert!(names.contains(&"variable.image_id"), "Should find variable block, got: {:?}", names);
+        assert!(names.contains(&"resource.aws_instance.web"), "Should find resource block, got: {:?}", names);
+        assert!(
+            names.contains(&"resource.aws_instance.web.lifecycle"),
+            "Should find nested lifecycle block with qualified name, got: {:?}",
+            names
+        );
+        assert!(!names.contains(&"ami"), "Should skip nested attributes inside blocks, got: {:?}", names);
+        assert!(
+            !names.contains(&"create_before_destroy"),
+            "Should skip nested attributes inside nested blocks, got: {:?}",
+            names
+        );
+
+        let lifecycle = entities
+            .iter()
+            .find(|e| e.name == "resource.aws_instance.web.lifecycle")
+            .unwrap();
+        assert!(lifecycle.parent_id.is_some(), "lifecycle should be nested under resource");
+        assert!(types.contains(&"attribute"), "Should preserve attribute entity type for top-level attributes");
+    }
 }

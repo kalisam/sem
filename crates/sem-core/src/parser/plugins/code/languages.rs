@@ -1,5 +1,10 @@
 use tree_sitter::Language;
 
+pub struct SuppressedNestedEntity {
+    pub parent_entity_node_type: &'static str,
+    pub child_entity_node_type: &'static str,
+}
+
 #[allow(dead_code)]
 pub struct LanguageConfig {
     pub id: &'static str,
@@ -7,6 +12,7 @@ pub struct LanguageConfig {
     pub entity_node_types: &'static [&'static str],
     pub container_node_types: &'static [&'static str],
     pub call_entity_identifiers: &'static [&'static str],
+    pub suppressed_nested_entities: &'static [SuppressedNestedEntity],
     pub get_language: fn() -> Option<Language>,
 }
 
@@ -74,6 +80,10 @@ fn get_bash() -> Option<Language> {
     Some(tree_sitter_bash::LANGUAGE.into())
 }
 
+fn get_hcl() -> Option<Language> {
+    Some(tree_sitter_hcl::LANGUAGE.into())
+}
+
 static TYPESCRIPT_CONFIG: LanguageConfig = LanguageConfig {
     id: "typescript",
     extensions: &[".ts"],
@@ -91,6 +101,7 @@ static TYPESCRIPT_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["class_body", "interface_body", "enum_body", "statement_block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_typescript,
 };
 
@@ -111,6 +122,7 @@ static TSX_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["class_body", "interface_body", "enum_body", "statement_block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_tsx,
 };
 
@@ -128,6 +140,7 @@ static JAVASCRIPT_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["class_body", "statement_block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_javascript,
 };
 
@@ -141,6 +154,7 @@ static PYTHON_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_python,
 };
 
@@ -156,6 +170,7 @@ static GO_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_go,
 };
 
@@ -175,6 +190,7 @@ static RUST_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["declaration_list", "block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_rust,
 };
 
@@ -192,6 +208,7 @@ static JAVA_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["class_body", "interface_body", "enum_body", "block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_java,
 };
 
@@ -208,6 +225,7 @@ static C_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["compound_statement"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_c,
 };
 
@@ -226,6 +244,7 @@ static CPP_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["field_declaration_list", "declaration_list", "compound_statement"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_cpp,
 };
 
@@ -240,6 +259,7 @@ static RUBY_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["body_statement"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_ruby,
 };
 
@@ -259,6 +279,7 @@ static CSHARP_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["declaration_list", "block"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_csharp,
 };
 
@@ -276,6 +297,7 @@ static PHP_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["declaration_list", "enum_declaration_list", "compound_statement"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_php,
 };
 
@@ -292,6 +314,7 @@ static FORTRAN_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &[],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_fortran,
 };
 
@@ -312,6 +335,7 @@ static SWIFT_CONFIG: LanguageConfig = LanguageConfig {
     ],
     container_node_types: &["class_body", "protocol_body", "enum_class_body", "function_body"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_swift,
 };
 
@@ -325,6 +349,7 @@ static ELIXIR_CONFIG: LanguageConfig = LanguageConfig {
         "defguard", "defguardp", "defprotocol", "defimpl",
         "defstruct", "defexception", "defdelegate",
     ],
+    suppressed_nested_entities: &[],
     get_language: get_elixir,
 };
 
@@ -334,7 +359,21 @@ static BASH_CONFIG: LanguageConfig = LanguageConfig {
     entity_node_types: &["function_definition"],
     container_node_types: &["compound_statement"],
     call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
     get_language: get_bash,
+};
+
+static HCL_CONFIG: LanguageConfig = LanguageConfig {
+    id: "hcl",
+    extensions: &[".hcl", ".tf", ".tfvars"],
+    entity_node_types: &["block", "attribute"],
+    container_node_types: &["body"],
+    call_entity_identifiers: &[],
+    suppressed_nested_entities: &[SuppressedNestedEntity {
+        parent_entity_node_type: "block",
+        child_entity_node_type: "attribute",
+    }],
+    get_language: get_hcl,
 };
 
 static ALL_CONFIGS: &[&LanguageConfig] = &[
@@ -354,6 +393,7 @@ static ALL_CONFIGS: &[&LanguageConfig] = &[
     &SWIFT_CONFIG,
     &ELIXIR_CONFIG,
     &BASH_CONFIG,
+    &HCL_CONFIG,
 ];
 
 pub fn get_language_config(extension: &str) -> Option<&'static LanguageConfig> {
@@ -366,12 +406,9 @@ pub fn get_language_config(extension: &str) -> Option<&'static LanguageConfig> {
 pub fn get_all_code_extensions() -> &'static [&'static str] {
     // All unique extensions across all language configs
     static EXTENSIONS: &[&str] = &[
-        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs",
-        ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
-        ".rb", ".cs", ".php", ".f90", ".f95", ".f03", ".f08", ".f", ".for",
-        ".swift",
-        ".ex", ".exs",
-        ".sh",
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java", ".c", ".h",
+        ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".rb", ".cs", ".php", ".f90", ".f95", ".f03",
+        ".f08", ".f", ".for", ".swift", ".ex", ".exs", ".sh", ".hcl", ".tf", ".tfvars",
     ];
     EXTENSIONS
 }
