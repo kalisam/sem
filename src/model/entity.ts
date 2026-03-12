@@ -7,6 +7,8 @@ export interface SemanticEntity {
   parentId?: string;
   content: string;
   contentHash: string;
+  /** Function body content (params + body, excluding name). Used for rename similarity. */
+  bodyContent?: string;
   startLine: number;
   endLine: number;
   metadata?: Record<string, string>;

@@ -92,12 +92,13 @@ export function matchEntities(
     }
   }
 
-  // Phase 3: Fuzzy similarity (>80% threshold)
+  // Phase 3: Fuzzy similarity for rename detection
+  // Uses bodyContent (params + body, no name) when available for more accurate comparison
   const stillUnmatchedBefore = unmatchedBefore.filter(e => !matchedBefore.has(e.id));
   const stillUnmatchedAfter = unmatchedAfter.filter(e => !matchedAfter.has(e.id));
 
   if (similarityFn && stillUnmatchedBefore.length > 0 && stillUnmatchedAfter.length > 0) {
-    const THRESHOLD = 0.8;
+    const THRESHOLD = 0.65;
 
     for (const afterEntity of stillUnmatchedAfter) {
       let bestMatch: SemanticEntity | null = null;
@@ -107,7 +108,11 @@ export function matchEntities(
         if (matchedBefore.has(beforeEntity.id)) continue;
         if (beforeEntity.entityType !== afterEntity.entityType) continue;
 
-        const score = similarityFn(beforeEntity, afterEntity);
+        // Use body similarity (excludes name) when available, fall back to full content
+        const score = (beforeEntity.bodyContent && afterEntity.bodyContent)
+          ? bodySimilarity(beforeEntity, afterEntity)
+          : similarityFn(beforeEntity, afterEntity);
+
         if (score > bestScore && score >= THRESHOLD) {
           bestScore = score;
           bestMatch = beforeEntity;
@@ -178,5 +183,22 @@ export function defaultSimilarity(a: SemanticEntity, b: SemanticEntity): number 
   const intersection = new Set([...tokensA].filter(t => tokensB.has(t)));
   const union = new Set([...tokensA, ...tokensB]);
   if (union.size === 0) return 0;
+  return intersection.size / union.size;
+}
+
+/** Body-only similarity: compares bodyContent (params + body, no name) using Jaccard index.
+ *  Requires a minimum number of shared tokens to avoid false positives on tiny functions. */
+export function bodySimilarity(a: SemanticEntity, b: SemanticEntity): number {
+  const bodyA = a.bodyContent ?? a.content;
+  const bodyB = b.bodyContent ?? b.content;
+  const tokensA = new Set(bodyA.split(/\s+/));
+  const tokensB = new Set(bodyB.split(/\s+/));
+  const intersection = new Set([...tokensA].filter(t => tokensB.has(t)));
+  const union = new Set([...tokensA, ...tokensB]);
+  if (union.size === 0) return 0;
+
+  const MIN_SHARED_TOKENS = 10;
+  if (intersection.size < MIN_SHARED_TOKENS) return 0;
+
   return intersection.size / union.size;
 }
