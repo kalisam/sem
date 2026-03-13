@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/rust-stable-orange" alt="Rust">
   <img src="https://img.shields.io/badge/tests-46_passing-brightgreen" alt="Tests">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="License"></a>
-  <img src="https://img.shields.io/badge/languages-19-blue" alt="Languages">
+  <img src="https://img.shields.io/badge/languages-20-blue" alt="Languages">
 </p>
 
 ```
@@ -101,7 +101,7 @@ sem blame src/auth.ts
 
 ## What it parses
 
-19 programming languages with full entity extraction via tree-sitter:
+20 programming languages with full entity extraction via tree-sitter:
 
 | Language | Extensions | Entities |
 |----------|-----------|----------|
@@ -123,6 +123,7 @@ sem blame src/auth.ts
 | Kotlin | `.kt` `.kts` | classes, interfaces, objects, functions, properties, companion objects |
 | Fortran | `.f90` `.f95` `.f` | functions, subroutines, modules, programs |
 | Vue | `.vue` | template/script/style blocks + inner TS/JS entities |
+| XML | `.xml` `.plist` `.svg` `.csproj` | elements (nested, tag-name identity) |
 
 Plus structured data formats:
 

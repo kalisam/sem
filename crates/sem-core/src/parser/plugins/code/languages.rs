@@ -88,6 +88,10 @@ fn get_kotlin() -> Option<Language> {
     Some(tree_sitter_kotlin_ng::LANGUAGE.into())
 }
 
+fn get_xml() -> Option<Language> {
+    Some(tree_sitter_xml::LANGUAGE_XML.into())
+}
+
 static TYPESCRIPT_CONFIG: LanguageConfig = LanguageConfig {
     id: "typescript",
     extensions: &[".ts"],
@@ -398,6 +402,16 @@ static KOTLIN_CONFIG: LanguageConfig = LanguageConfig {
     get_language: get_kotlin,
 };
 
+static XML_CONFIG: LanguageConfig = LanguageConfig {
+    id: "xml",
+    extensions: &[".xml", ".plist", ".svg", ".xhtml", ".csproj", ".fsproj", ".vbproj", ".props", ".targets", ".nuspec", ".resx", ".xaml", ".axml"],
+    entity_node_types: &["element"],
+    container_node_types: &["content"],
+    call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
+    get_language: get_xml,
+};
+
 static ALL_CONFIGS: &[&LanguageConfig] = &[
     &TYPESCRIPT_CONFIG,
     &TSX_CONFIG,
@@ -417,6 +431,7 @@ static ALL_CONFIGS: &[&LanguageConfig] = &[
     &BASH_CONFIG,
     &HCL_CONFIG,
     &KOTLIN_CONFIG,
+    &XML_CONFIG,
 ];
 
 pub fn get_language_config(extension: &str) -> Option<&'static LanguageConfig> {
@@ -433,6 +448,8 @@ pub fn get_all_code_extensions() -> &'static [&'static str] {
         ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".rb", ".cs", ".php", ".f90", ".f95", ".f03",
         ".f08", ".f", ".for", ".swift", ".ex", ".exs", ".sh", ".hcl", ".tf", ".tfvars",
         ".kt", ".kts",
+        ".xml", ".plist", ".svg", ".xhtml", ".csproj", ".fsproj", ".vbproj", ".props", ".targets",
+        ".nuspec", ".resx", ".xaml", ".axml",
     ];
     EXTENSIONS
 }

@@ -533,4 +533,34 @@ fun topLevel(x: Int): Int = x * 2
         assert!(names.contains(&"AppConfig"), "got: {:?}", names);
         assert!(names.contains(&"topLevel"), "got: {:?}", names);
     }
+
+    #[test]
+    fn test_xml_entity_extraction() {
+        let code = r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <groupId>com.example</groupId>
+    <artifactId>my-app</artifactId>
+    <dependencies>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven</groupId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+"#;
+        let plugin = CodeParserPlugin;
+        let entities = plugin.extract_entities(code, "pom.xml");
+        let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+        eprintln!("XML entities: {:?}", entities.iter().map(|e| (&e.name, &e.entity_type)).collect::<Vec<_>>());
+        assert!(names.contains(&"project"), "got: {:?}", names);
+        assert!(names.contains(&"dependencies"), "got: {:?}", names);
+        assert!(names.contains(&"build"), "got: {:?}", names);
+    }
 }

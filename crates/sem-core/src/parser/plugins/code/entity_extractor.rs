@@ -377,6 +377,25 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
         }
     }
 
+    // For XML elements, extract tag name from STag or EmptyElemTag
+    if node_type == "element" {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "STag" || child.kind() == "EmptyElemTag" {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    return Some(node_text(name_node, source).to_string());
+                }
+                // Fallback: first Name child
+                let mut inner = child.walk();
+                for inner_child in child.named_children(&mut inner) {
+                    if inner_child.kind() == "Name" {
+                        return Some(node_text(inner_child, source).to_string());
+                    }
+                }
+            }
+        }
+    }
+
     // For HCL blocks, combine block type with labels (e.g., resource.cloudflare_record.dns)
     if node_type == "block" {
         let mut parts = Vec::new();
