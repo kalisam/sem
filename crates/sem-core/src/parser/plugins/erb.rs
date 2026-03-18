@@ -115,29 +115,7 @@ impl SemanticParserPlugin for ErbParserPlugin {
                         metadata: None,
                     });
                 }
-                TagKind::Code => {
-                    let code_content =
-                        lines[tag.start_line - 1..tag.end_line].join("\n");
-                    let name = unique_name(&tag.name, &mut name_counts);
-                    entities.push(SemanticEntity {
-                        id: build_entity_id(
-                            file_path,
-                            "erb_code",
-                            &name,
-                            Some(&template_id),
-                        ),
-                        file_path: file_path.to_string(),
-                        entity_type: "erb_code".to_string(),
-                        name,
-                        parent_id: Some(template_id.clone()),
-                        content: code_content.clone(),
-                        content_hash: content_hash(&code_content),
-                        structural_hash: None,
-                        start_line: tag.start_line,
-                        end_line: tag.end_line,
-                        metadata: None,
-                    });
-                }
+                // No separate Code variant needed; expressions cover all non-block tags
             }
         }
 
@@ -152,7 +130,6 @@ enum TagKind {
     BlockOpen,
     BlockClose,
     Expression,
-    Code,
 }
 
 #[derive(Debug)]
@@ -181,50 +158,15 @@ fn extract_tags_from_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<ErbTag>
         let end_line = node.end_position().row + 1;
 
         match node.kind() {
-            "output_directive" => {
-                // <%= expr %>
-                if let Some(code_text) = code_child_text(&node, source) {
-                    let trimmed = code_text.trim();
-                    if !trimmed.is_empty() {
-                        tags.push(ErbTag {
-                            kind: TagKind::Expression,
-                            name: truncate_name(trimmed),
-                            start_line,
-                            end_line,
-                        });
-                    }
-                }
-            }
-            "directive" => {
-                // <% code %>
+            "directive" | "output_directive" => {
                 if let Some(code_text) = code_child_text(&node, source) {
                     let trimmed = code_text.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
-                    let first_word = trimmed.split_whitespace().next().unwrap_or("");
 
-                    if first_word == "end" {
-                        tags.push(ErbTag {
-                            kind: TagKind::BlockClose,
-                            name: "end".to_string(),
-                            start_line,
-                            end_line,
-                        });
-                    } else if is_block_opener(trimmed) {
-                        tags.push(ErbTag {
-                            kind: TagKind::BlockOpen,
-                            name: truncate_name(trimmed),
-                            start_line,
-                            end_line,
-                        });
-                    } else if !is_mid_block_keyword(first_word) {
-                        tags.push(ErbTag {
-                            kind: TagKind::Code,
-                            name: truncate_name(trimmed),
-                            start_line,
-                            end_line,
-                        });
+                    if let Some(tag) = classify_code(trimmed, start_line, end_line) {
+                        tags.push(tag);
                     }
                 }
             }
@@ -234,6 +176,38 @@ fn extract_tags_from_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<ErbTag>
     }
 
     tags
+}
+
+/// Classify a code snippet from inside an ERB tag.
+/// Returns None for mid-block keywords (else, elsif, etc.) that should be skipped.
+fn classify_code(trimmed: &str, start_line: usize, end_line: usize) -> Option<ErbTag> {
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+
+    if first_word == "end" {
+        Some(ErbTag {
+            kind: TagKind::BlockClose,
+            name: "end".to_string(),
+            start_line,
+            end_line,
+        })
+    } else if is_block_opener(trimmed) {
+        Some(ErbTag {
+            kind: TagKind::BlockOpen,
+            name: truncate_name(trimmed),
+            start_line,
+            end_line,
+        })
+    } else if is_mid_block_keyword(first_word) {
+        None
+    } else {
+        // Expression or standalone code
+        Some(ErbTag {
+            kind: TagKind::Expression,
+            name: truncate_name(trimmed),
+            start_line,
+            end_line,
+        })
+    }
 }
 
 fn code_child_text<'a>(node: &tree_sitter::Node, source: &'a str) -> Option<&'a str> {
@@ -341,12 +315,12 @@ mod tests {
         assert_eq!(user_name.entity_type, "erb_expression");
         assert_eq!(user_name.start_line, 4);
 
-        // Code
+        // Standalone code shows as expression
         let code = entities
             .iter()
             .find(|e| e.name == "@count = @items.length")
             .unwrap();
-        assert_eq!(code.entity_type, "erb_code");
+        assert_eq!(code.entity_type, "erb_expression");
         assert_eq!(code.start_line, 14);
 
         // Comment should be skipped
@@ -390,6 +364,35 @@ mod tests {
         assert_eq!(extract_template_name("views/best.html.erb"), "best.html");
         assert_eq!(extract_template_name("loading.erb"), "loading");
         assert_eq!(extract_template_name("app/views/_partial.html.erb"), "_partial.html");
+    }
+
+    #[test]
+    fn test_erb_dash_variant() {
+        // <%- is the whitespace-stripping variant, should produce blocks like <%
+        let erb = r#"<header>
+  <%- if @show %>
+    <%= @title %>
+  <%- else %>
+    <p>nope</p>
+  <%- end if %>
+</header>
+"#;
+        let plugin = ErbParserPlugin;
+        let entities = plugin.extract_entities(erb, "test.html.erb");
+
+        let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+        let types: Vec<&str> = entities.iter().map(|e| e.entity_type.as_str()).collect();
+        eprintln!("Dash variant: {:?}",
+            names.iter().zip(types.iter()).collect::<Vec<_>>());
+
+        // <%- if %> ... <%- end if %> should create a block
+        let if_block = entities.iter().find(|e| e.name == "if @show").unwrap();
+        assert_eq!(if_block.entity_type, "erb_block");
+        assert_eq!(if_block.start_line, 2);
+        assert_eq!(if_block.end_line, 6);
+
+        // else should be skipped
+        assert!(!names.iter().any(|n| *n == "else"));
     }
 
     #[test]
