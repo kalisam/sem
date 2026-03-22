@@ -16,15 +16,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show semantic diff of changes
+    /// Show semantic diff of changes (supports git diff syntax)
     Diff {
-        /// Two files to compare (e.g. sem diff old.ts new.ts)
-        #[arg(num_args = 0..=2)]
-        files: Vec<String>,
+        /// Git refs, files, or pathspecs (supports ref1..ref2, ref1...ref2, -- paths)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
 
-        /// Show only staged changes
+        /// Show only staged changes (alias: --cached)
         #[arg(long)]
         staged: bool,
+
+        /// Show only staged changes (alias for --staged)
+        #[arg(long)]
+        cached: bool,
 
         /// Show changes from a specific commit
         #[arg(long)]
@@ -111,8 +115,9 @@ fn main() {
 
     match cli.command {
         Some(Commands::Diff {
-            files,
+            args,
             staged,
+            cached,
             commit,
             from,
             to,
@@ -125,6 +130,7 @@ fn main() {
             let output_format = match format.as_str() {
                 "json" => OutputFormat::Json,
                 "markdown" | "md" => OutputFormat::Markdown,
+                "plain" => OutputFormat::Plain,
                 _ => OutputFormat::Terminal,
             };
 
@@ -134,7 +140,7 @@ fn main() {
                     .to_string_lossy()
                     .to_string(),
                 format: output_format,
-                staged,
+                staged: staged || cached,
                 commit,
                 from,
                 to,
@@ -142,7 +148,7 @@ fn main() {
                 verbose,
                 profile,
                 file_exts,
-                files,
+                args,
             });
         }
         Some(Commands::Blame { file, json }) => {
@@ -210,7 +216,7 @@ fn main() {
                 verbose: false,
                 profile: false,
                 file_exts: vec![],
-                files: vec![],
+                args: vec![],
             });
         }
     }
