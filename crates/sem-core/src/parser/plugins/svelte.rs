@@ -1237,7 +1237,7 @@ class="app"></div>"#,
         assert_eq!(module.entity_type, "svelte_module");
         assert!(
             module.parent_id.is_none(),
-            "Top-level module entity should not have a parent"
+            "module entity should not have a parent"
         );
         let create_counter = entities
             .iter()
@@ -1278,7 +1278,7 @@ class="app"></div>"#,
     }
 
     #[test]
-    fn test_svelte_head_fixture() {
+    fn test_svelte_head() {
         let code = r#"<svelte:head>
 	<title>Hello world!</title>
 	<meta name="description" content="This is where the description goes for SEO" />
@@ -1306,7 +1306,7 @@ class="app"></div>"#,
     }
 
     #[test]
-    fn test_svelte_multiple_scripts_fixture() {
+    fn test_svelte_multiple_scripts() {
         let code = r#"<script>
 	REPLACEME
 </script>
@@ -1335,7 +1335,7 @@ class="app"></div>"#,
     }
 
     #[test]
-    fn test_svelte_snippet_fixture() {
+    fn test_svelte_snippet() {
         let code = r#"<script lang="ts"></script>
 
 {#snippet foo(msg: string)}
@@ -1371,7 +1371,7 @@ class="app"></div>"#,
     }
 
     #[test]
-    fn test_svelte_window_fixture() {
+    fn test_svelte_window() {
         let code = r#"<script>
 	function handleKeydown(event) {
 		alert(`pressed the ${event.key} key`);
@@ -1412,7 +1412,7 @@ class="app"></div>"#,
     }
 
     #[test]
-    fn test_svelte_if_block_fixture() {
+    fn test_svelte_if_block() {
         let code = r#"{#if foo}bar{/if}
 "#;
         let plugin = SvelteParserPlugin;
@@ -1432,7 +1432,7 @@ class="app"></div>"#,
     }
 
     #[test]
-    fn test_svelte_options_fixture() {
+    fn test_svelte_options() {
         let code = r#"<svelte:options runes={true} namespace="html" css="injected" customElement="my-custom-element" />
 "#;
         let plugin = SvelteParserPlugin;
@@ -1477,7 +1477,7 @@ let items = $state(['a', 'b', 'c']);
         let each = entities
             .iter()
             .find(|e| e.entity_type == "svelte_each_block")
-            .expect("should extract each block");
+            .expect("missing each block");
         assert!(each.name.starts_with("each@"));
         assert_eq!(each.start_line, 5);
         assert_eq!(each.end_line, 9);
@@ -1491,17 +1491,17 @@ let items = $state(['a', 'b', 'c']);
         let li = entities
             .iter()
             .find(|e| e.name.starts_with("li@"))
-            .expect("should extract li element inside each");
+            .expect("missing li element inside each block");
         assert_eq!(li.parent_id.as_deref(), Some(each.id.as_str()));
 
         let p = entities
             .iter()
             .find(|e| e.name.starts_with("p@"))
-            .expect("should extract p element inside {:else} fallback");
+            .expect("missing fallback element inside each block");
         assert_eq!(
             p.parent_id.as_deref(),
             Some(each.id.as_str()),
-            "fallback content should be parented to the each block"
+            "fallback element should be parented to the each block"
         );
     }
 
@@ -1517,7 +1517,7 @@ let items = $state(['a', 'b', 'c']);
         let key = entities
             .iter()
             .find(|e| e.entity_type == "svelte_key_block")
-            .expect("should extract key block");
+            .expect("missing key block");
         assert!(key.name.starts_with("key@"));
         assert_eq!(key.start_line, 1);
         assert_eq!(key.end_line, 3);
@@ -1525,7 +1525,7 @@ let items = $state(['a', 'b', 'c']);
         let widget = entities
             .iter()
             .find(|e| e.entity_type == "svelte_component" && e.name.starts_with("Widget@"))
-            .expect("should extract Widget component inside key block");
+            .expect("missing component inside key block");
         assert_eq!(widget.parent_id.as_deref(), Some(key.id.as_str()));
     }
 
@@ -1545,7 +1545,7 @@ let items = $state(['a', 'b', 'c']);
         let await_block = entities
             .iter()
             .find(|e| e.entity_type == "svelte_await_block")
-            .expect("should extract await block");
+            .expect("missing await block");
         assert!(await_block.name.starts_with("await@"));
         assert_eq!(await_block.start_line, 1);
         assert_eq!(await_block.end_line, 7);
@@ -1554,16 +1554,12 @@ let items = $state(['a', 'b', 'c']);
             .iter()
             .filter(|e| e.name.starts_with("p@"))
             .collect();
-        assert_eq!(
-            ps.len(),
-            3,
-            "should extract p elements from pending, then, and catch branches"
-        );
+        assert_eq!(ps.len(), 3, "expected content from all await branches");
         for p in &ps {
             assert_eq!(
                 p.parent_id.as_deref(),
                 Some(await_block.id.as_str()),
-                "all p elements should be parented to await block"
+                "await branch content should be parented to the await block"
             );
         }
     }
@@ -1585,29 +1581,21 @@ let items = $state(['a', 'b', 'c']);
             .iter()
             .filter(|e| e.entity_type == "svelte_if_block")
             .collect();
-        assert_eq!(
-            ifs.len(),
-            2,
-            "should extract both if and else-if as separate if blocks"
-        );
+        assert_eq!(ifs.len(), 2, "expected both if and else-if blocks");
 
         let outer_if = &ifs[0];
         let inner_if = &ifs[1];
         assert_eq!(
             inner_if.parent_id.as_deref(),
             Some(outer_if.id.as_str()),
-            "else-if block should be nested under the outer if"
+            "else-if block should be nested under the outer if block"
         );
 
         let ps: Vec<_> = entities
             .iter()
             .filter(|e| e.name.starts_with("p@"))
             .collect();
-        assert_eq!(
-            ps.len(),
-            3,
-            "should extract all three p elements from branches"
-        );
+        assert_eq!(ps.len(), 3, "expected content from each branch");
     }
 
     #[test]
@@ -1632,7 +1620,7 @@ let items = $state(['a', 'b', 'c']);
 
         assert_ne!(
             compact_div.content_hash, spaced_div.content_hash,
-            "content hashes should differ because raw text differs"
+            "content hash should change when source text changes"
         );
     }
 
@@ -1655,7 +1643,7 @@ function add(a, b) { return a * b; }
 
         assert_ne!(
             before_add.content_hash, after_add.content_hash,
-            "changing function body should change content hash"
+            "function content hash should change with new logic"
         );
         assert_eq!(before_add.entity_type, "function");
         assert_eq!(after_add.entity_type, "function");
@@ -1670,7 +1658,7 @@ function add(a, b) { return a * b; }
             .unwrap();
         assert_ne!(
             before_script.content_hash, after_script.content_hash,
-            "script block content hash should also change"
+            "script content hash should change with new logic"
         );
     }
 
@@ -1697,14 +1685,14 @@ export function greet(name: string) {
             .unwrap();
         assert!(
             script.parent_id.is_none(),
-            "script block should be a top-level entity"
+            "script block should be top-level"
         );
 
         let greet = entities.iter().find(|e| e.name == "greet").unwrap();
         assert_eq!(
             greet.parent_id.as_deref(),
             Some(script.id.as_str()),
-            "greet function should be parented to the script block"
+            "function should be parented to the script block"
         );
         assert_eq!(greet.entity_type, "function");
 
@@ -1815,17 +1803,17 @@ function increment() {
         let child_names: Vec<&str> = script_children.iter().map(|e| e.name.as_str()).collect();
         assert!(
             child_names.contains(&"count"),
-            "should extract count rune declaration, got: {:?}",
+            "missing count variable: {:?}",
             child_names
         );
         assert!(
             child_names.contains(&"doubled"),
-            "should extract doubled rune declaration, got: {:?}",
+            "missing doubled variable: {:?}",
             child_names
         );
         assert!(
             child_names.contains(&"increment"),
-            "should extract increment function, got: {:?}",
+            "missing increment function: {:?}",
             child_names
         );
     }
@@ -1843,22 +1831,22 @@ function increment() {
         let dialog = entities
             .iter()
             .find(|e| e.entity_type == "svelte_component" && e.name.starts_with("Dialog@"))
-            .expect("should extract Dialog component");
+            .expect("missing Dialog component");
 
         let h2 = entities
             .iter()
             .find(|e| e.name.starts_with("h2@"))
-            .expect("should extract h2 inside Dialog");
+            .expect("missing h2 inside Dialog");
         assert_eq!(
             h2.parent_id.as_deref(),
             Some(dialog.id.as_str()),
-            "h2 should be parented to Dialog component"
+            "h2 should be parented to Dialog"
         );
 
         let p = entities
             .iter()
             .find(|e| e.name.starts_with("p@"))
-            .expect("should extract p inside Dialog");
+            .expect("missing p inside Dialog");
         assert_eq!(p.parent_id.as_deref(), Some(dialog.id.as_str()));
     }
 
@@ -1893,7 +1881,7 @@ function increment() {
         let entities = plugin.extract_entities(code, "Empty.svelte");
         assert!(
             entities.is_empty(),
-            "empty component should produce no entities, got: {:?}",
+            "empty component should produce no entities: {:?}",
             entities.iter().map(|e| &e.name).collect::<Vec<_>>()
         );
     }
@@ -1909,13 +1897,13 @@ function increment() {
         let body = entities
             .iter()
             .find(|e| e.entity_type == "svelte_body")
-            .expect("should extract svelte:body");
+            .expect("missing svelte:body");
         assert!(body.name.starts_with("svelte:body@"));
 
         let doc = entities
             .iter()
             .find(|e| e.entity_type == "svelte_document")
-            .expect("should extract svelte:document");
+            .expect("missing svelte:document");
         assert!(doc.name.starts_with("svelte:document@"));
     }
 
@@ -1935,10 +1923,10 @@ let b = 2;
             .iter()
             .filter(|e| e.entity_type == "svelte_instance_script")
             .collect();
-        assert_eq!(scripts.len(), 2, "should extract both script blocks");
+        assert_eq!(scripts.len(), 2, "expected both script blocks");
         assert_ne!(
             scripts[0].name, scripts[1].name,
-            "script blocks should have disambiguated names"
+            "script block names should be disambiguated"
         );
         assert_eq!(scripts[0].name, "script");
         assert_eq!(scripts[1].name, "script:2");
@@ -1961,24 +1949,24 @@ function hello() {}
             .unwrap();
         assert!(
             script.id.contains("src/routes/+page.svelte"),
-            "entity ID should contain file path, got: {}",
+            "entity id should include file path: {}",
             script.id
         );
         assert!(
             script.id.contains("svelte_instance_script"),
-            "entity ID should contain entity type, got: {}",
+            "entity id should include entity type: {}",
             script.id
         );
 
         let hello = entities.iter().find(|e| e.name == "hello").unwrap();
         assert!(
             hello.id.contains("hello"),
-            "child entity ID should contain the entity name, got: {}",
+            "child entity id should include entity name: {}",
             hello.id
         );
         assert!(
             hello.parent_id.is_some(),
-            "script-extracted function should have a parent ID"
+            "script-extracted function should have a parent id"
         );
     }
 
@@ -2029,7 +2017,7 @@ function hello() {}
                 .changes
                 .iter()
                 .all(|c| c.change_type == ChangeType::Added),
-            "all changes should be Added for a new file: {:?}",
+            "all changes should be added for a new file: {:?}",
             result
                 .changes
                 .iter()
