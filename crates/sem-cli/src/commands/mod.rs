@@ -10,15 +10,35 @@ pub mod setup;
 /// Truncate a string to `max_chars` Unicode scalar values (codepoints), appending "..." if
 /// truncated. Safe for multibyte encodings (CJK, simple emoji). Note: does not split on grapheme
 /// cluster boundaries — ZWJ emoji sequences may render incorrectly at the truncation point.
+///
+/// If `max_chars <= 3`, no ellipsis is appended (no room); the string is simply truncated.
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
     if max_chars <= 3 {
         return s.chars().take(max_chars).collect();
     }
-    if s.chars().count() > max_chars {
-        let truncated: String = s.chars().take(max_chars - 3).collect();
-        format!("{truncated}...")
-    } else {
+    // Use char_indices to find the byte boundary in a single pass
+    let mut last_boundary = 0;
+    let mut truncate_boundary = 0;
+    let mut count = 0;
+    for (i, c) in s.char_indices() {
+        count += 1;
+        if count == max_chars - 3 {
+            truncate_boundary = i + c.len_utf8();
+        }
+        if count == max_chars {
+            last_boundary = i + c.len_utf8();
+            break;
+        }
+    }
+    if count < max_chars {
+        // String fits within max_chars — return as-is
         s.to_string()
+    } else if s[last_boundary..].is_empty() {
+        // Exactly max_chars — return as-is
+        s.to_string()
+    } else {
+        // String exceeds max_chars — truncate with ellipsis
+        format!("{}...", &s[..truncate_boundary])
     }
 }
 
