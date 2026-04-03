@@ -12,14 +12,14 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::git::types::{FileChange, FileStatus};
 use crate::model::entity::SemanticEntity;
 use crate::parser::registry::ParserRegistry;
 
 /// A reference from one entity to another.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityRef {
     pub from_entity: String,
@@ -28,7 +28,7 @@ pub struct EntityRef {
 }
 
 /// Type of reference between entities.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RefType {
     /// Function/method call
@@ -53,7 +53,7 @@ pub struct EntityGraph {
 }
 
 /// Minimal entity info stored in the graph.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityInfo {
     pub id: String,
@@ -65,6 +65,28 @@ pub struct EntityInfo {
 }
 
 impl EntityGraph {
+    /// Reconstruct an EntityGraph from pre-loaded parts (e.g. from a cache).
+    pub fn from_parts(entities: HashMap<String, EntityInfo>, edges: Vec<EntityRef>) -> Self {
+        let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+        let mut dependencies: HashMap<String, Vec<String>> = HashMap::new();
+        for edge in &edges {
+            dependents
+                .entry(edge.to_entity.clone())
+                .or_default()
+                .push(edge.from_entity.clone());
+            dependencies
+                .entry(edge.from_entity.clone())
+                .or_default()
+                .push(edge.to_entity.clone());
+        }
+        EntityGraph {
+            entities,
+            edges,
+            dependents,
+            dependencies,
+        }
+    }
+
     /// Build an entity graph from a set of files.
     ///
     /// Pass 1: Extract all entities from all files using the parser registry.

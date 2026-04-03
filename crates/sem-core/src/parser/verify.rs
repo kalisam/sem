@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use crate::model::entity::SemanticEntity;
 use crate::parser::graph::EntityGraph;
 use crate::parser::registry::ParserRegistry;
 
@@ -93,6 +94,80 @@ pub fn verify_contracts(
         let expected = extract_param_count(callee_content);
         if expected == 0 {
             continue; // can't verify zero-param functions meaningfully
+        }
+
+        if let Some(actual) = count_call_args(caller_content, &callee.name) {
+            if actual != expected {
+                violations.push(ContractViolation {
+                    entity_name: callee.name.clone(),
+                    file_path: callee.file_path.clone(),
+                    expected_params: expected,
+                    caller_name: caller.name.clone(),
+                    caller_file: caller.file_path.clone(),
+                    actual_args: actual,
+                });
+            }
+        }
+    }
+
+    violations
+}
+
+/// Like `verify_contracts`, but accepts a pre-built graph + entities to avoid
+/// redundant work when the caller already has them cached.
+pub fn verify_contracts_with_graph(
+    graph: &EntityGraph,
+    all_entities: &[SemanticEntity],
+    target_file: Option<&str>,
+) -> Vec<ContractViolation> {
+    let content_map: std::collections::HashMap<String, String> = all_entities
+        .iter()
+        .map(|e| (e.id.clone(), e.content.clone()))
+        .collect();
+
+    let mut violations = Vec::new();
+
+    for edge in &graph.edges {
+        if edge.ref_type != crate::parser::graph::RefType::Calls {
+            continue;
+        }
+
+        let callee = match graph.entities.get(&edge.to_entity) {
+            Some(e) => e,
+            None => continue,
+        };
+
+        if let Some(tf) = target_file {
+            if callee.file_path != tf {
+                continue;
+            }
+        }
+
+        if !matches!(
+            callee.entity_type.as_str(),
+            "function" | "method" | "arrow_function"
+        ) {
+            continue;
+        }
+
+        let callee_content = match content_map.get(&edge.to_entity) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let caller = match graph.entities.get(&edge.from_entity) {
+            Some(e) => e,
+            None => continue,
+        };
+
+        let caller_content = match content_map.get(&edge.from_entity) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let expected = extract_param_count(callee_content);
+        if expected == 0 {
+            continue;
         }
 
         if let Some(actual) = count_call_args(caller_content, &callee.name) {

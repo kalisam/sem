@@ -1,12 +1,14 @@
+mod cache;
 mod commands;
 mod formatters;
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use commands::blame::{blame_command, BlameOptions};
+use commands::context::{context_command, ContextOptions};
 use commands::diff::{diff_command, DiffOptions, OutputFormat};
-use commands::graph::{graph_command, GraphFormat, GraphOptions};
-use commands::impact::{impact_command, ImpactOptions};
+use commands::entities::{entities_command, EntitiesOptions};
+use commands::impact::{impact_command, ImpactMode, ImpactOptions};
 use commands::log::{log_command, LogOptions};
 
 #[derive(Parser)]
@@ -64,15 +66,27 @@ enum Commands {
         #[arg(long)]
         file_exts: Vec<String>,
     },
-    /// Show impact of changing an entity (what else would break?)
+    /// Show impact of changing an entity (deps, dependents, transitive impact, tests)
     Impact {
         /// Name of the entity to analyze
         #[arg()]
         entity: String,
 
-        /// Specific files to analyze (default: all supported files)
+        /// File containing the entity (disambiguates if multiple matches)
         #[arg(long)]
-        files: Vec<String>,
+        file: Option<String>,
+
+        /// Show direct dependencies only
+        #[arg(long)]
+        deps: bool,
+
+        /// Show direct dependents only
+        #[arg(long)]
+        dependents: bool,
+
+        /// Show affected test entities only
+        #[arg(long)]
+        tests: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -91,24 +105,6 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-    },
-    /// Show entity dependency graph
-    Graph {
-        /// Specific files to analyze (default: all supported files)
-        #[arg()]
-        files: Vec<String>,
-
-        /// Show dependencies/dependents for a specific entity
-        #[arg(long)]
-        entity: Option<String>,
-
-        /// Output format: terminal, json, or markdown
-        #[arg(long, default_value = "terminal")]
-        format: String,
-
-        /// Only include files with these extensions (e.g. --file-exts .py .rs)
-        #[arg(long)]
-        file_exts: Vec<String>,
     },
     /// Show evolution of an entity through git history
     Log {
@@ -131,6 +127,38 @@ enum Commands {
         /// Show content diff between versions
         #[arg(long, short = 'v')]
         verbose: bool,
+    },
+    /// List entities in a file
+    Entities {
+        /// File to extract entities from
+        #[arg()]
+        file: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show token-budgeted context for an entity
+    Context {
+        /// Name of the entity
+        #[arg()]
+        entity: String,
+
+        /// File containing the entity (disambiguates if multiple matches)
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Token budget
+        #[arg(long, default_value = "8000")]
+        budget: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Only include files with these extensions (e.g. --file-exts .py .rs)
+        #[arg(long)]
+        file_exts: Vec<String>,
     },
     /// Replace `git diff` with `sem diff` globally
     Setup,
@@ -191,41 +219,33 @@ fn main() {
         }
         Some(Commands::Impact {
             entity,
-            files,
+            file,
+            deps,
+            dependents,
+            tests,
             json,
             file_exts,
         }) => {
+            let mode = if deps {
+                ImpactMode::Deps
+            } else if dependents {
+                ImpactMode::Dependents
+            } else if tests {
+                ImpactMode::Tests
+            } else {
+                ImpactMode::All
+            };
+
             impact_command(ImpactOptions {
                 cwd: std::env::current_dir()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string(),
                 entity_name: entity,
-                file_paths: files,
+                file_hint: file,
                 json,
                 file_exts,
-            });
-        }
-        Some(Commands::Graph {
-            files,
-            entity,
-            format,
-            file_exts,
-        }) => {
-            let graph_format = match format.as_str() {
-                "json" => GraphFormat::Json,
-                _ => GraphFormat::Terminal,
-            };
-
-            graph_command(GraphOptions {
-                cwd: std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-                file_paths: files,
-                entity,
-                format: graph_format,
-                file_exts,
+                mode,
             });
         }
         Some(Commands::Log {
@@ -245,6 +265,35 @@ fn main() {
                 limit,
                 json,
                 verbose,
+            });
+        }
+        Some(Commands::Entities { file, json }) => {
+            entities_command(EntitiesOptions {
+                cwd: std::env::current_dir()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+                file_path: file,
+                json,
+            });
+        }
+        Some(Commands::Context {
+            entity,
+            file,
+            budget,
+            json,
+            file_exts,
+        }) => {
+            context_command(ContextOptions {
+                cwd: std::env::current_dir()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+                entity_name: entity,
+                file_path: file,
+                budget,
+                json,
+                file_exts,
             });
         }
         Some(Commands::Setup) => {

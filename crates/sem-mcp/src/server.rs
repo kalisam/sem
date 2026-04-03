@@ -17,6 +17,7 @@ use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 use tokio::sync::Mutex;
 
+use crate::cache;
 use crate::tools::*;
 
 /// Lazily-initialized repo context.
@@ -34,11 +35,19 @@ fn content_hash_u64(content: &str) -> u64 {
     hasher.finish()
 }
 
+/// Cached entity graph + all entities, keyed by manifest hash.
+struct CachedGraph {
+    manifest_hash: u64,
+    graph: Arc<EntityGraph>,
+    entities: Arc<Vec<SemanticEntity>>,
+}
+
 #[derive(Clone)]
 pub struct SemServer {
     context: Arc<Mutex<Option<RepoContext>>>,
     registry: Arc<ParserRegistry>,
     entity_cache: Arc<Mutex<EntityCache>>,
+    graph_cache: Arc<Mutex<Option<CachedGraph>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -197,6 +206,82 @@ impl SemServer {
             .map(|e| e.id.as_str())
             .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", entity_name)))
     }
+
+    /// Extract all entities from all supported files in parallel.
+    fn extract_all_entities(
+        root: &Path,
+        file_paths: &[String],
+        registry: &ParserRegistry,
+    ) -> Vec<SemanticEntity> {
+        file_paths
+            .iter()
+            .filter_map(|fp| {
+                let full = root.join(fp);
+                let content = std::fs::read_to_string(&full).ok()?;
+                let plugin = registry.get_plugin(fp)?;
+                Some(plugin.extract_entities(&content, fp))
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Get cached graph or build a new one. Checks: memory cache -> SQLite cache -> fresh build.
+    async fn get_or_build_graph(
+        &self,
+        repo_root: &Path,
+        file_paths: &[String],
+    ) -> (Arc<EntityGraph>, Arc<Vec<SemanticEntity>>) {
+        let manifest_hash = cache::compute_manifest_hash(repo_root, file_paths).unwrap_or(0);
+
+        // Check memory cache
+        {
+            let guard = self.graph_cache.lock().await;
+            if let Some(ref cached) = *guard {
+                if cached.manifest_hash == manifest_hash {
+                    return (cached.graph.clone(), cached.entities.clone());
+                }
+            }
+        }
+
+        // Check SQLite cache
+        if let Ok(disk) = cache::DiskCache::open(repo_root) {
+            if let Some((graph, entities)) = disk.load(repo_root, file_paths) {
+                let graph = Arc::new(graph);
+                let entities = Arc::new(entities);
+                let mut guard = self.graph_cache.lock().await;
+                *guard = Some(CachedGraph {
+                    manifest_hash,
+                    graph: graph.clone(),
+                    entities: entities.clone(),
+                });
+                return (graph, entities);
+            }
+        }
+
+        // Fresh build
+        let graph = EntityGraph::build(repo_root, file_paths, &self.registry);
+        let entities = Self::extract_all_entities(repo_root, file_paths, &self.registry);
+
+        // Persist to SQLite (best-effort)
+        if let Ok(disk) = cache::DiskCache::open(repo_root) {
+            let _ = disk.save(repo_root, file_paths, &graph, &entities);
+        }
+
+        let graph = Arc::new(graph);
+        let entities = Arc::new(entities);
+
+        // Store in memory cache
+        {
+            let mut guard = self.graph_cache.lock().await;
+            *guard = Some(CachedGraph {
+                manifest_hash,
+                graph: graph.clone(),
+                entities: entities.clone(),
+            });
+        }
+
+        (graph, entities)
+    }
 }
 
 #[tool_router]
@@ -208,6 +293,7 @@ impl SemServer {
             entity_cache: Arc::new(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(500).unwrap(),
             ))),
+            graph_cache: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -251,9 +337,9 @@ impl SemServer {
         )]))
     }
 
-    // ── Tool 2: Impact analysis ──
+    // ── Tool 2: Impact analysis (unified: deps, dependents, impact, tests) ──
 
-    #[tool(description = "Impact analysis: if this entity changes, what else might be affected? Returns all transitive dependents.")]
+    #[tool(description = "Unified entity analysis: dependencies, dependents, transitive impact, and affected tests. Use 'mode' to narrow: 'all' (default), 'deps', 'dependents', 'tests'.")]
     async fn sem_impact(
         &self,
         Parameters(params): Parameters<ImpactAnalysisParams>,
@@ -265,114 +351,97 @@ impl SemServer {
         let (rel_path, _) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, all_entities) = self.get_or_build_graph(&ctx.repo_root, &file_paths).await;
 
         let entity_id = Self::find_entity_in_graph(&graph, &params.entity_name, &rel_path)?;
-        let impact = graph.impact_analysis(entity_id);
-        let result: Vec<serde_json::Value> = impact
-            .iter()
-            .map(|d| {
+
+        let mode = params.mode.as_deref().unwrap_or("all");
+
+        let output = match mode {
+            "deps" => {
+                let deps = graph.get_dependencies(entity_id);
+                let result: Vec<serde_json::Value> = deps
+                    .iter()
+                    .map(|d| serde_json::json!({
+                        "name": d.name, "type": d.entity_type,
+                        "file": d.file_path, "lines": [d.start_line, d.end_line],
+                    }))
+                    .collect();
                 serde_json::json!({
-                    "name": d.name,
-                    "type": d.entity_type,
-                    "file": d.file_path,
-                    "lines": [d.start_line, d.end_line],
+                    "entity": params.entity_name,
+                    "file": rel_path,
+                    "mode": "deps",
+                    "dependencies": result,
                 })
-            })
-            .collect();
+            }
+            "dependents" => {
+                let deps = graph.get_dependents(entity_id);
+                let result: Vec<serde_json::Value> = deps
+                    .iter()
+                    .map(|d| serde_json::json!({
+                        "name": d.name, "type": d.entity_type,
+                        "file": d.file_path, "lines": [d.start_line, d.end_line],
+                    }))
+                    .collect();
+                serde_json::json!({
+                    "entity": params.entity_name,
+                    "file": rel_path,
+                    "mode": "dependents",
+                    "dependents": result,
+                })
+            }
+            "tests" => {
+                let tests = graph.test_impact(entity_id, &all_entities);
+                let result: Vec<serde_json::Value> = tests
+                    .iter()
+                    .map(|d| serde_json::json!({
+                        "name": d.name, "type": d.entity_type,
+                        "file": d.file_path, "lines": [d.start_line, d.end_line],
+                    }))
+                    .collect();
+                serde_json::json!({
+                    "entity": params.entity_name,
+                    "file": rel_path,
+                    "mode": "tests",
+                    "tests_affected": result.len(),
+                    "tests": result,
+                })
+            }
+            _ => {
+                // "all" mode: everything
+                let deps = graph.get_dependencies(entity_id);
+                let dependents = graph.get_dependents(entity_id);
+                let impact = graph.impact_analysis(entity_id);
+                let tests = graph.test_impact(entity_id, &all_entities);
+
+                let map_entities = |list: &[&sem_core::parser::graph::EntityInfo]| -> Vec<serde_json::Value> {
+                    list.iter().map(|d| serde_json::json!({
+                        "name": d.name, "type": d.entity_type,
+                        "file": d.file_path, "lines": [d.start_line, d.end_line],
+                    })).collect()
+                };
+
+                serde_json::json!({
+                    "entity": params.entity_name,
+                    "file": rel_path,
+                    "mode": "all",
+                    "dependencies": map_entities(&deps),
+                    "dependents": map_entities(&dependents),
+                    "impact": {
+                        "total": impact.len(),
+                        "entities": map_entities(&impact),
+                    },
+                    "tests": map_entities(&tests),
+                })
+            }
+        };
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "entity": params.entity_name,
-                "file": rel_path,
-                "total_affected": result.len(),
-                "affected_entities": result,
-            }))
-            .unwrap_or_default(),
+            serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
 
-    // ── Tool 3: Dependencies ──
-
-    #[tool(description = "Get entities that the given entity depends on (calls, references, imports)")]
-    async fn sem_dependencies(
-        &self,
-        Parameters(params): Parameters<DependenciesParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
-        let (rel_path, _) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
-
-        let entity_id = Self::find_entity_in_graph(&graph, &params.entity_name, &rel_path)?;
-        let deps = graph.get_dependencies(entity_id);
-        let result: Vec<serde_json::Value> = deps
-            .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "name": d.name,
-                    "type": d.entity_type,
-                    "file": d.file_path,
-                    "lines": [d.start_line, d.end_line],
-                })
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "entity": params.entity_name,
-                "file": rel_path,
-                "dependencies": result,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    // ── Tool 4: Dependents ──
-
-    #[tool(description = "Get entities that depend on the given entity (reverse dependencies)")]
-    async fn sem_dependents(
-        &self,
-        Parameters(params): Parameters<DependentsParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
-        let (rel_path, _) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
-
-        let entity_id = Self::find_entity_in_graph(&graph, &params.entity_name, &rel_path)?;
-        let deps = graph.get_dependents(entity_id);
-        let result: Vec<serde_json::Value> = deps
-            .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "name": d.name,
-                    "type": d.entity_type,
-                    "file": d.file_path,
-                    "lines": [d.start_line, d.end_line],
-                })
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "entity": params.entity_name,
-                "file": rel_path,
-                "dependents": result,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    // ── Tool 5: Semantic diff ──
+    // ── Tool 3: Semantic diff ──
 
     #[tool(description = "Semantic diff between two refs: shows entity-level changes (added, modified, deleted, renamed) instead of line-level diffs")]
     async fn sem_diff(
@@ -431,106 +500,7 @@ impl SemServer {
         )]))
     }
 
-    // ── Tool 6: Verify contracts ──
-
-    #[tool(description = "Verify function call contracts: check that callers pass the correct number of arguments to callees. Returns violations.")]
-    async fn sem_verify(
-        &self,
-        Parameters(params): Parameters<VerifyParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
-        let (rel_path, _) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let violations = sem_core::parser::verify::verify_contracts(
-            &ctx.repo_root,
-            &file_paths,
-            &self.registry,
-            Some(&rel_path),
-        );
-
-        let result: Vec<serde_json::Value> = violations
-            .iter()
-            .map(|v| {
-                serde_json::json!({
-                    "entity": v.entity_name,
-                    "file": v.file_path,
-                    "expected_params": v.expected_params,
-                    "caller": v.caller_name,
-                    "caller_file": v.caller_file,
-                    "actual_args": v.actual_args,
-                })
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "file": rel_path,
-                "violations": result.len(),
-                "details": result,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    // ── Tool 7: Test map ──
-
-    #[tool(description = "Find test entities that would be affected if the given entity changes. Combines impact analysis with test detection.")]
-    async fn sem_test_map(
-        &self,
-        Parameters(params): Parameters<TestMapParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
-        let (rel_path, _) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
-
-        let entity_id = Self::find_entity_in_graph(&graph, &params.entity_name, &rel_path)?;
-
-        // Collect all entities for test filtering
-        let all_entities: Vec<SemanticEntity> = file_paths
-            .iter()
-            .filter_map(|fp| {
-                let full = ctx.repo_root.join(fp);
-                let content = std::fs::read_to_string(&full).ok()?;
-                let plugin = self.registry.get_plugin(fp)?;
-                Some(plugin.extract_entities(&content, fp))
-            })
-            .flatten()
-            .collect();
-
-        let test_entities = graph.test_impact(entity_id, &all_entities);
-        let result: Vec<serde_json::Value> = test_entities
-            .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "name": d.name,
-                    "type": d.entity_type,
-                    "file": d.file_path,
-                    "lines": [d.start_line, d.end_line],
-                })
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "entity": params.entity_name,
-                "file": rel_path,
-                "tests_affected": result.len(),
-                "tests": result,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    // ── Tool 8: Context budget ──
+    // ── Tool 4: Context budget ──
 
     #[tool(description = "Pack optimal entity context into a token budget. Priority: target entity (full) > direct dependents (full) > transitive (signature only).")]
     async fn sem_context(
@@ -544,21 +514,9 @@ impl SemServer {
         let (rel_path, _) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, all_entities) = self.get_or_build_graph(&ctx.repo_root, &file_paths).await;
 
         let entity_id = Self::find_entity_in_graph(&graph, &params.entity_name, &rel_path)?;
-
-        // Collect all entities for content lookup
-        let all_entities: Vec<SemanticEntity> = file_paths
-            .iter()
-            .filter_map(|fp| {
-                let full = ctx.repo_root.join(fp);
-                let content = std::fs::read_to_string(&full).ok()?;
-                let plugin = self.registry.get_plugin(fp)?;
-                Some(plugin.extract_entities(&content, fp))
-            })
-            .flatten()
-            .collect();
 
         let budget = params.token_budget.unwrap_or(8000);
         let entries = sem_core::parser::context::build_context(
@@ -596,7 +554,7 @@ impl SemServer {
         )]))
     }
 
-    // ── Tool 9: Hotspot analysis ──
+    // ── Tool 5: Hotspot analysis ──
 
     #[tool(description = "Analyze entity churn: find the most frequently changed entities across git history. High-churn entities are bug hotspots.")]
     async fn sem_hotspot(
@@ -650,8 +608,8 @@ impl ServerHandler for SemServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "sem MCP server for entity-level semantic code intelligence. \
-             Provides impact analysis, dependency graphs, contract verification, \
-             test mapping, context budgeting, and hotspot detection.",
+             Provides impact analysis (deps, dependents, transitive impact, tests), \
+             semantic diffs, context budgeting, and hotspot detection.",
         )
     }
 }
