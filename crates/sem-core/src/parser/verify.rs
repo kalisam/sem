@@ -243,6 +243,9 @@ fn count_call_args(content: &str, callee_name: &str) -> Option<usize> {
         }
 
         search_start = pos + 1;
+        while search_start < content.len() && !content.is_char_boundary(search_start) {
+            search_start += 1;
+        }
     }
 
     None
@@ -304,5 +307,13 @@ mod tests {
         assert_eq!(count_call_args("foo()", "foo"), Some(0));
         assert_eq!(count_call_args("bar(1)", "foo"), None);
         assert_eq!(count_call_args("foo(a, b)", "foo"), Some(2));
+    }
+
+    #[test]
+    fn test_count_call_args_multibyte_utf8() {
+        // Ensure no panic when content contains multi-byte UTF-8 characters before the call site
+        assert_eq!(count_call_args("let café = foo(1, 2);", "foo"), Some(2));
+        assert_eq!(count_call_args("let É = 1; bar(x)", "bar"), Some(1));
+        assert_eq!(count_call_args("// 日本語コメント\nfoo(a, b, c)", "foo"), Some(3));
     }
 }

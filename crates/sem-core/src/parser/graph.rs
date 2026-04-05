@@ -931,7 +931,11 @@ fn infer_ref_type(content: &str, ref_name: &str) -> RefType {
                 return RefType::Calls;
             }
         }
+        // Advance past pos to the next char boundary to avoid slicing inside a multi-byte UTF-8 char.
         search_start = pos + 1;
+        while search_start < content.len() && !content.is_char_boundary(search_start) {
+            search_start += 1;
+        }
     }
 
     // Check if it's in an import/use statement (line-level, not substring)
@@ -1189,6 +1193,24 @@ mod tests {
     fn test_infer_ref_type_type() {
         assert_eq!(
             infer_ref_type("let x: MyType = something", "MyType"),
+            RefType::TypeRef,
+        );
+    }
+
+    #[test]
+    fn test_infer_ref_type_multibyte_utf8() {
+        // Ensure no panic when content contains multi-byte UTF-8 characters
+        assert_eq!(
+            infer_ref_type("let café = foo(x)", "foo"),
+            RefType::Calls,
+        );
+        assert_eq!(
+            infer_ref_type("class HandicapfrPublicationFieldsEnum:\n    É = 1\n    bar()", "bar"),
+            RefType::Calls,
+        );
+        // No match should not panic either
+        assert_eq!(
+            infer_ref_type("// 日本語コメント\nlet x = 1", "missing"),
             RefType::TypeRef,
         );
     }
