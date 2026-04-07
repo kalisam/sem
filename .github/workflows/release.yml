@@ -155,6 +155,14 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
 
+      - name: Publish sem-mcp
+        run: cargo publish -p sem-mcp
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
       - name: Publish sem-cli
         run: cargo publish -p sem-cli
         env:
