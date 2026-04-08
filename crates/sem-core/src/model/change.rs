@@ -30,6 +30,7 @@ pub struct SemanticChange {
     pub change_type: ChangeType,
     pub entity_type: String,
     pub entity_name: String,
+    #[serde(default)]
     pub entity_line: usize,
     pub file_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
