@@ -1,5 +1,6 @@
 use sem_core::model::change::ChangeType;
 use sem_core::parser::differ::DiffResult;
+use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 
 pub fn format_markdown(result: &DiffResult, verbose: bool) -> String {
@@ -81,11 +82,34 @@ pub fn format_markdown(result: &DiffResult, verbose: bool) -> String {
                             post_table.push(String::new());
                             post_table.push(format!("**`{}`**", change.entity_name));
                             post_table.push("```diff".to_string());
-                            for line in before.lines() {
-                                post_table.push(format!("- {line}"));
-                            }
-                            for line in after.lines() {
-                                post_table.push(format!("+ {line}"));
+                            let diff = TextDiff::from_lines(before.as_str(), after.as_str());
+                            for hunk in diff.unified_diff().context_radius(2).iter_hunks() {
+                                post_table.push(hunk.header().to_string());
+                                for op in hunk.ops() {
+                                    let mut deletes: Vec<String> = Vec::new();
+                                    let mut inserts: Vec<String> = Vec::new();
+
+                                    for diff_change in diff.iter_changes(op) {
+                                        let line = diff_change.value().trim_end_matches('\n');
+                                        match diff_change.tag() {
+                                            ChangeTag::Delete => deletes.push(line.to_string()),
+                                            ChangeTag::Insert => inserts.push(line.to_string()),
+                                            ChangeTag::Equal => post_table.push(format!("  {line}")),
+                                        }
+                                    }
+
+                                    let paired = deletes.len().min(inserts.len());
+                                    for i in 0..paired {
+                                        post_table.push(format!("- {}", deletes[i]));
+                                        post_table.push(format!("+ {}", inserts[i]));
+                                    }
+                                    for d in &deletes[paired..] {
+                                        post_table.push(format!("- {d}"));
+                                    }
+                                    for i in &inserts[paired..] {
+                                        post_table.push(format!("+ {i}"));
+                                    }
+                                }
                             }
                             post_table.push("```".to_string());
                         }
