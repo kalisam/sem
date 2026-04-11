@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use rayon::prelude::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::git::types::{FileChange, FileStatus};
@@ -151,18 +152,101 @@ impl EntityGraph {
             })
             .collect();
 
+        // Build class-related maps for dot-chain resolution
+        // class_entity_names: all class/struct/interface entity names
+        let class_entity_names: HashSet<&str> = all_entities
+            .iter()
+            .filter(|e| matches!(e.entity_type.as_str(), "class" | "struct" | "interface" | "class_type"))
+            .map(|e| e.name.as_str())
+            .collect();
+
+        // id_to_name: quick lookup for parent name resolution
+        let id_to_name: HashMap<&str, &str> = all_entities
+            .iter()
+            .map(|e| (e.id.as_str(), e.name.as_str()))
+            .collect();
+
+        // enclosing_class: entity_id → class_name (for self/this resolution)
+        // class_members: class_name → [(member_name, member_entity_id)]
+        let mut enclosing_class: HashMap<&str, &str> = HashMap::new();
+        let mut class_members: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+
+        for entity in &all_entities {
+            if let Some(ref pid) = entity.parent_id {
+                if let Some(&parent_name) = id_to_name.get(pid.as_str()) {
+                    if class_entity_names.contains(parent_name) {
+                        enclosing_class.insert(entity.id.as_str(), parent_name);
+                        class_members
+                            .entry(parent_name)
+                            .or_default()
+                            .push((entity.name.as_str(), entity.id.as_str()));
+                    }
+                }
+            }
+        }
+
         // Build import table: (file_path, imported_name) → target entity ID
         // e.g. ("io_handler.py", "validate") → "core.py::function::validate"
         let import_table = build_import_table(root, file_paths, &symbol_table, &entity_map);
 
         // Pass 2: Extract references in parallel, then resolve against symbol table
-        // Step 2a: Parallel reference extraction per entity
+        // Phase 1: Dot-chain resolution (precise self.X, this.X, ClassName.X)
+        // Phase 2: Bag-of-words resolution (existing logic, skipping consumed words)
         let resolved_refs: Vec<(String, String, RefType)> = all_entities
             .par_iter()
             .flat_map(|entity| {
-                let refs = extract_references_from_content(&entity.content, &entity.name);
                 let mut entity_edges = Vec::new();
+                let mut consumed_words: HashSet<String> = HashSet::new();
+
+                // Phase 1: Dot-chain resolution
+                let stripped = strip_comments_and_strings(&entity.content);
+                let dot_chains = extract_dot_chains(&stripped);
+
+                for (receiver, member) in &dot_chains {
+                    if *receiver == "self" || *receiver == "this" {
+                        // self.B / this.B: resolve to sibling method in enclosing class
+                        if let Some(class_name) = enclosing_class.get(entity.id.as_str()) {
+                            if let Some(members) = class_members.get(class_name) {
+                                for (n, tid) in members {
+                                    if *n == *member && *tid != entity.id.as_str() {
+                                        entity_edges.push((
+                                            entity.id.clone(),
+                                            tid.to_string(),
+                                            RefType::Calls,
+                                        ));
+                                        consumed_words.insert(member.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else if class_entity_names.contains(*receiver) {
+                        // ClassName.B: resolve to class member
+                        if let Some(members) = class_members.get(*receiver) {
+                            for (n, tid) in members {
+                                if *n == *member {
+                                    entity_edges.push((
+                                        entity.id.clone(),
+                                        tid.to_string(),
+                                        RefType::Calls,
+                                    ));
+                                    consumed_words.insert(member.to_string());
+                                    consumed_words.insert(receiver.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Unresolved chains fall through to bag-of-words below
+                }
+
+                // Phase 2: Bag-of-words resolution (skip words consumed by dot-chains)
+                let refs = extract_references_from_content(&entity.content, &entity.name);
                 for ref_name in refs {
+                    if consumed_words.contains(ref_name) {
+                        continue;
+                    }
+
                     // Skip references to names that are this class's own methods
                     if class_child_names.contains(&(entity.id.as_str(), ref_name)) {
                         continue;
@@ -199,7 +283,7 @@ impl EntityGraph {
                             });
 
                         if let Some(target_id) = target {
-                            // Skip parent-child edges (class → own method)
+                            // Skip parent-child edges (class -> own method)
                             if parent_child_pairs.contains(&(entity.id.as_str(), target_id.as_str()))
                                 || parent_child_pairs.contains(&(target_id.as_str(), entity.id.as_str()))
                             {
@@ -758,9 +842,107 @@ fn build_import_table(
                 }
             }
         }
+
+        // JS/TS imports: import { foo, bar as baz } from './module'
+        //                import Foo from './module'
+        let is_js_ts = file_path.ends_with(".js") || file_path.ends_with(".ts")
+            || file_path.ends_with(".jsx") || file_path.ends_with(".tsx");
+
+        if is_js_ts {
+            static JS_NAMED_RE: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r#"import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]"#).unwrap()
+            });
+            static JS_DEFAULT_RE: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r#"import\s+(?:type\s+)?([A-Za-z_]\w*)\s+from\s*['"]([^'"]+)['"]"#).unwrap()
+            });
+
+            for cap in JS_NAMED_RE.captures_iter(&content) {
+                let names_str = cap.get(1).unwrap().as_str();
+                let module_path = cap.get(2).unwrap().as_str();
+                let source_module = module_path.rsplit('/').next().unwrap_or(module_path);
+                let source_module = strip_js_ext(source_module);
+
+                for name_part in names_str.split(',') {
+                    let name_part = name_part.trim();
+                    if name_part.is_empty() { continue; }
+
+                    // Handle "foo as bar" aliases and "type foo" prefixes
+                    let (original_name, local_name) = if let Some(pos) = name_part.find(" as ") {
+                        let orig = name_part[..pos].trim();
+                        let local = name_part[pos + 4..].trim();
+                        let orig = orig.strip_prefix("type ").unwrap_or(orig);
+                        (orig, local)
+                    } else {
+                        let name = name_part.strip_prefix("type ").unwrap_or(name_part);
+                        (name, name)
+                    };
+
+                    if original_name.is_empty() || local_name.is_empty() { continue; }
+
+                    if let Some(target_ids) = symbol_table.get(original_name) {
+                        let target = target_ids.iter().find(|id| {
+                            entity_map.get(*id).map_or(false, |e| {
+                                let stem = e.file_path.rsplit('/').next().unwrap_or(&e.file_path);
+                                let stem = strip_file_ext(stem);
+                                stem == source_module
+                            })
+                        });
+                        if let Some(target_id) = target {
+                            import_table.insert(
+                                (file_path.clone(), local_name.to_string()),
+                                target_id.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            for cap in JS_DEFAULT_RE.captures_iter(&content) {
+                let local_name = cap.get(1).unwrap().as_str();
+                let module_path = cap.get(2).unwrap().as_str();
+                let source_module = module_path.rsplit('/').next().unwrap_or(module_path);
+                let source_module = strip_js_ext(source_module);
+
+                if let Some(target_ids) = symbol_table.get(local_name) {
+                    let target = target_ids.iter().find(|id| {
+                        entity_map.get(*id).map_or(false, |e| {
+                            let stem = e.file_path.rsplit('/').next().unwrap_or(&e.file_path);
+                            let stem = strip_file_ext(stem);
+                            stem == source_module
+                        })
+                    });
+                    if let Some(target_id) = target {
+                        import_table.insert(
+                            (file_path.clone(), local_name.to_string()),
+                            target_id.clone(),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     import_table
+}
+
+/// Strip JS/TS extensions from a module name.
+fn strip_js_ext(s: &str) -> &str {
+    s.strip_suffix(".js")
+        .or_else(|| s.strip_suffix(".ts"))
+        .or_else(|| s.strip_suffix(".jsx"))
+        .or_else(|| s.strip_suffix(".tsx"))
+        .unwrap_or(s)
+}
+
+/// Strip common file extensions from a filename.
+fn strip_file_ext(s: &str) -> &str {
+    s.strip_suffix(".py")
+        .or_else(|| s.strip_suffix(".ts"))
+        .or_else(|| s.strip_suffix(".js"))
+        .or_else(|| s.strip_suffix(".tsx"))
+        .or_else(|| s.strip_suffix(".jsx"))
+        .or_else(|| s.strip_suffix(".rs"))
+        .unwrap_or(s)
 }
 
 /// Strip comments and string literals from content to avoid false references.
@@ -840,6 +1022,25 @@ fn strip_comments_and_strings(content: &str) -> String {
     }
 
     String::from_utf8_lossy(&result).into_owned()
+}
+
+/// Extract dot-chains (receiver.member) from content for precise resolution.
+/// Returns unique (receiver, member) pairs found in the content.
+fn extract_dot_chains<'a>(content: &'a str) -> Vec<(&'a str, &'a str)> {
+    static DOT_CHAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)").unwrap()
+    });
+
+    let mut chains = Vec::new();
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    for cap in DOT_CHAIN_RE.captures_iter(content) {
+        let receiver = cap.get(1).unwrap().as_str();
+        let member = cap.get(2).unwrap().as_str();
+        if seen.insert((receiver, member)) {
+            chains.push((receiver, member));
+        }
+    }
+    chains
 }
 
 /// Extract identifier references from entity content using simple token analysis.
@@ -1212,6 +1413,190 @@ mod tests {
         assert_eq!(
             infer_ref_type("// 日本語コメント\nlet x = 1", "missing"),
             RefType::TypeRef,
+        );
+    }
+
+    #[test]
+    fn test_dot_chain_self_resolution() {
+        let (dir, registry) = create_test_repo();
+        let root = dir.path();
+
+        write_file(root, "service.py", "\
+class MyService:
+    def process(self):
+        return self.validate()
+
+    def validate(self):
+        return True
+");
+
+        let graph = EntityGraph::build(root, &["service.py".into()], &registry);
+
+        // process should have an edge to validate via self.validate()
+        let process_id = graph.entities.keys()
+            .find(|id| id.contains("process"))
+            .expect("process entity should exist");
+        let deps = graph.get_dependencies(process_id);
+        assert!(
+            deps.iter().any(|d| d.name == "validate"),
+            "process should depend on validate via self.validate(). Deps: {:?}",
+            deps.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_dot_chain_this_resolution() {
+        let (dir, registry) = create_test_repo();
+        let root = dir.path();
+
+        write_file(root, "service.ts", "\
+class UserService {
+    process() {
+        return this.validate();
+    }
+    validate() {
+        return true;
+    }
+}
+");
+
+        let graph = EntityGraph::build(root, &["service.ts".into()], &registry);
+
+        let process_id = graph.entities.keys()
+            .find(|id| id.contains("process"))
+            .expect("process entity should exist");
+        let deps = graph.get_dependencies(process_id);
+        assert!(
+            deps.iter().any(|d| d.name == "validate"),
+            "process should depend on validate via this.validate(). Deps: {:?}",
+            deps.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_dot_chain_class_static() {
+        let (dir, registry) = create_test_repo();
+        let root = dir.path();
+
+        write_file(root, "utils.ts", "\
+class MathUtils {
+    static compute() { return 1; }
+}
+function caller() { return MathUtils.compute(); }
+");
+
+        let graph = EntityGraph::build(root, &["utils.ts".into()], &registry);
+
+        let caller_id = graph.entities.keys()
+            .find(|id| id.contains("caller"))
+            .expect("caller entity should exist");
+        let deps = graph.get_dependencies(caller_id);
+        assert!(
+            deps.iter().any(|d| d.name == "compute"),
+            "caller should depend on compute via MathUtils.compute(). Deps: {:?}",
+            deps.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_js_ts_import_resolution() {
+        let (dir, registry) = create_test_repo();
+        let root = dir.path();
+
+        write_file(root, "helper.ts", "\
+export function helper() { return 1; }
+");
+        write_file(root, "main.ts", "\
+import { helper } from './helper';
+export function main() { return helper(); }
+");
+
+        let graph = EntityGraph::build(
+            root,
+            &["helper.ts".into(), "main.ts".into()],
+            &registry,
+        );
+
+        let main_id = graph.entities.keys()
+            .find(|id| id.contains("main"))
+            .expect("main entity should exist");
+        let deps = graph.get_dependencies(main_id);
+        assert!(
+            deps.iter().any(|d| d.name == "helper"),
+            "main should depend on helper via JS import. Deps: {:?}",
+            deps.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_dot_chain_no_false_edges() {
+        let (dir, registry) = create_test_repo();
+        let root = dir.path();
+
+        // Two classes with same method name "process".
+        // self.process() in ClassA should NOT create edge to ClassB::process.
+        write_file(root, "a.py", "\
+class ClassA:
+    def run(self):
+        return self.process()
+
+    def process(self):
+        return 1
+");
+        write_file(root, "b.py", "\
+class ClassB:
+    def process(self):
+        return 2
+");
+
+        let graph = EntityGraph::build(
+            root,
+            &["a.py".into(), "b.py".into()],
+            &registry,
+        );
+
+        let run_id = graph.entities.keys()
+            .find(|id| id.contains("run"))
+            .expect("run entity should exist");
+        let deps = graph.get_dependencies(run_id);
+        // Should have edge to ClassA::process, NOT ClassB::process
+        for dep in &deps {
+            if dep.name == "process" {
+                assert!(
+                    dep.file_path == "a.py",
+                    "run's process dep should be in a.py, not {}",
+                    dep.file_path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dot_chain_fallback() {
+        let (dir, registry) = create_test_repo();
+        let root = dir.path();
+
+        // someVar.unknownMethod() - "someVar" is not a class,
+        // so the chain is unresolved and words fall through to bag-of-words.
+        // "helper" should still resolve via bag-of-words.
+        write_file(root, "app.ts", "\
+export function helper() { return 1; }
+export function caller() {
+    const val = helper();
+    return val;
+}
+");
+
+        let graph = EntityGraph::build(root, &["app.ts".into()], &registry);
+
+        let caller_id = graph.entities.keys()
+            .find(|id| id.contains("caller"))
+            .expect("caller entity should exist");
+        let deps = graph.get_dependencies(caller_id);
+        assert!(
+            deps.iter().any(|d| d.name == "helper"),
+            "caller should still resolve helper via bag-of-words. Deps: {:?}",
+            deps.iter().map(|d| &d.name).collect::<Vec<_>>()
         );
     }
 }
