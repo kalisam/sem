@@ -40,7 +40,7 @@ pub fn verify_contracts(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let plugin = match registry.get_plugin(fp) {
+        let plugin = match registry.get_plugin_with_content(fp, &content) {
             Some(p) => p,
             None => continue,
         };

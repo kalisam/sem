@@ -35,7 +35,15 @@ impl SemanticParserPlugin for CodeParserPlugin {
 
         let config = match get_language_config(&ext) {
             Some(c) => c,
-            None => return Vec::new(),
+            None => {
+                // Try shebang detection for extensionless files
+                match detect_ext_from_content(content)
+                    .and_then(|se| get_language_config(&se))
+                {
+                    Some(c) => c,
+                    None => return Vec::new(),
+                }
+            }
         };
 
         let language = match (config.get_language)() {
@@ -60,6 +68,8 @@ impl SemanticParserPlugin for CodeParserPlugin {
         })
     }
 }
+
+use crate::parser::registry::detect_ext_from_content;
 
 #[cfg(test)]
 mod tests {
@@ -1511,5 +1521,48 @@ sub _private_helper {
         assert_eq!(find("Foo::Bar").entity_type, "package");
         assert_eq!(find("hello").entity_type, "function");
         assert_eq!(find("_private_helper").entity_type, "function");
+    }
+
+    #[test]
+    fn test_fortran_entity_extraction() {
+        let code = r#"module math_utils
+  implicit none
+contains
+  function add(a, b) result(c)
+    integer, intent(in) :: a, b
+    integer :: c
+    c = a + b
+  end function add
+
+  subroutine greet()
+    print *, "hello"
+  end subroutine greet
+end module math_utils
+
+program main
+  implicit none
+  print *, "hello"
+end program main
+"#;
+        let plugin = CodeParserPlugin;
+        let entities = plugin.extract_entities(code, "test.f90");
+        let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+
+        assert!(names.contains(&"math_utils"), "got: {:?}", names);
+        assert!(names.contains(&"add"), "got: {:?}", names);
+        assert!(names.contains(&"greet"), "got: {:?}", names);
+        assert!(names.contains(&"main"), "got: {:?}", names);
+
+        let find = |name: &str| entities.iter().find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("Should find {}, got: {:?}", name, names));
+
+        assert_eq!(find("math_utils").entity_type, "module");
+        assert_eq!(find("add").entity_type, "function");
+        assert_eq!(find("greet").entity_type, "subroutine");
+        assert_eq!(find("main").entity_type, "program");
+
+        // Nested entities have parent
+        assert!(find("add").parent_id.is_some());
+        assert!(find("greet").parent_id.is_some());
     }
 }

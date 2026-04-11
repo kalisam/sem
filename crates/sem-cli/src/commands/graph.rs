@@ -56,7 +56,7 @@ pub fn extract_all_entities(root: &Path, file_paths: &[String], registry: &Parse
         .filter_map(|fp| {
             let full = root.join(fp);
             let content = std::fs::read_to_string(&full).ok()?;
-            let plugin = registry.get_plugin(fp)?;
+            let plugin = registry.get_plugin_with_content(fp, &content)?;
             Some(plugin.extract_entities(&content, fp))
         })
         .flatten()

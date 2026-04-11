@@ -105,7 +105,7 @@ impl EntityGraph {
             .filter_map(|file_path| {
                 let full_path = root.join(file_path);
                 let content = std::fs::read_to_string(&full_path).ok()?;
-                let plugin = registry.get_plugin(file_path)?;
+                let plugin = registry.get_plugin_with_content(file_path, &content)?;
                 Some(plugin.extract_entities(&content, file_path))
             })
             .flatten()
@@ -503,14 +503,14 @@ impl EntityGraph {
         root: &Path,
         registry: &ParserRegistry,
     ) -> Option<Vec<SemanticEntity>> {
-        let plugin = registry.get_plugin(file_path)?;
-
         let content = if let Some(c) = content {
             c.to_string()
         } else {
             let full_path = root.join(file_path);
             std::fs::read_to_string(&full_path).ok()?
         };
+
+        let plugin = registry.get_plugin_with_content(file_path, &content)?;
 
         Some(plugin.extract_entities(&content, file_path))
     }

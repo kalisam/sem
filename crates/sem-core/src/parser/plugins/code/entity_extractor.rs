@@ -743,6 +743,32 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
         }
     }
 
+    // Fortran: wrapper nodes (function, subroutine, module, program, interface)
+    // have their name on the _statement child node as a "name" kind node
+    if node_type == "function"
+        || node_type == "subroutine"
+        || node_type == "module"
+        || node_type == "program"
+        || node_type == "interface"
+    {
+        let stmt_kind = format!("{}_statement", node_type);
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == stmt_kind {
+                // Try field first, then look for "name" kind child
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    return Some(node_text(name_node, source).to_string());
+                }
+                let mut inner = child.walk();
+                for grandchild in child.named_children(&mut inner) {
+                    if grandchild.kind() == "name" {
+                        return Some(node_text(grandchild, source).to_string());
+                    }
+                }
+            }
+        }
+    }
+
     // Fallback: first identifier child
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {

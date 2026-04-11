@@ -29,7 +29,10 @@ pub fn compute_semantic_diff(
     let per_file_changes: Vec<(String, Vec<SemanticChange>)> = file_changes
         .par_iter()
         .filter_map(|file| {
-            let plugin = registry.get_plugin(&file.file_path)?;
+            let content_hint = file.after_content.as_deref()
+                .or(file.before_content.as_deref())
+                .unwrap_or("");
+            let plugin = registry.get_plugin_with_content(&file.file_path, content_hint)?;
 
             let before_entities = if let Some(ref content) = file.before_content {
                 let before_path = file.old_file_path.as_deref().unwrap_or(&file.file_path);

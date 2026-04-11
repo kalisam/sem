@@ -105,8 +105,9 @@ pub fn log_command(opts: LogOptions) {
         file_path.clone()
     };
 
-    // Verify the file has a parser
-    let plugin = match registry.get_plugin(&file_path) {
+    // Verify the file has a parser (read content for shebang detection on extensionless files)
+    let file_content_hint = std::fs::read_to_string(root.join(&file_path)).unwrap_or_default();
+    let plugin = match registry.get_plugin_with_content(&file_path, &file_content_hint) {
         Some(p) => p,
         None => {
             eprintln!(
@@ -429,7 +430,7 @@ fn find_entity_file(
             Err(_) => continue,
         };
 
-        let plugin = match registry.get_plugin(file_path) {
+        let plugin = match registry.get_plugin_with_content(file_path, &content) {
             Some(p) => p,
             None => continue,
         };

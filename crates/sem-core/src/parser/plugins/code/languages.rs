@@ -415,7 +415,7 @@ static FORTRAN_CONFIG: LanguageConfig = LanguageConfig {
         "interface",
         "type_declaration",
     ],
-    container_node_types: &[],
+    container_node_types: &["module", "program", "internal_procedures"],
     call_entity_identifiers: &[],
     suppressed_nested_entities: &[],
     scope_boundary_types: &[],
@@ -538,7 +538,7 @@ static DART_CONFIG: LanguageConfig = LanguageConfig {
   
 static PERL_CONFIG: LanguageConfig = LanguageConfig {
     id: "perl",
-    extensions: &[".pl", ".pm"],
+    extensions: &[".pl", ".pm", ".t"],
     entity_node_types: &[
         "subroutine_declaration_statement",
         "package_statement",
@@ -633,7 +633,7 @@ pub fn get_all_code_extensions() -> &'static [&'static str] {
         ".xml", ".plist", ".svg", ".xhtml", ".csproj", ".fsproj", ".vbproj", ".props", ".targets",
         ".nuspec", ".resx", ".xaml", ".axml",
         ".dart",
-        ".pl", ".pm",
+        ".pl", ".pm", ".t",
         ".ml", ".mli",
     ];
     EXTENSIONS

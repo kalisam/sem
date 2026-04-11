@@ -37,7 +37,7 @@ pub fn blame_command(opts: BlameOptions) {
         }
     };
 
-    let plugin = match registry.get_plugin(&opts.file_path) {
+    let plugin = match registry.get_plugin_with_content(&opts.file_path, &content) {
         Some(p) => p,
         None => {
             eprintln!(

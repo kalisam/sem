@@ -211,7 +211,7 @@ sem unsetup
 
 ## What it parses
 
-22 programming languages with full entity extraction via tree-sitter:
+23 programming languages with full entity extraction via tree-sitter:
 
 | Language | Extensions | Entities |
 |----------|-----------|----------|
@@ -236,6 +236,7 @@ sem unsetup
 | XML | `.xml` `.plist` `.svg` `.csproj` | elements (nested, tag-name identity) |
 | ERB | `.erb` `.html.erb` | blocks, expressions, code tags |
 | Svelte | `.svelte` `.svelte.js` `.svelte.ts` | component blocks + rune JS/TS modules |
+| Perl | `.pl` `.pm` `.t` | subroutines, packages |
 | Dart | `.dart` | classes, mixins, extensions, enums, type aliases, functions |
 
 Plus structured data formats:

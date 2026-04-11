@@ -22,7 +22,7 @@ pub fn entities_command(opts: EntitiesOptions) {
         }
     };
 
-    let plugin = match registry.get_plugin(&opts.file_path) {
+    let plugin = match registry.get_plugin_with_content(&opts.file_path, &content) {
         Some(p) => p,
         None => {
             eprintln!("{} No parser for '{}'", "error:".red().bold(), opts.file_path);

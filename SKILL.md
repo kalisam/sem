@@ -12,14 +12,14 @@ Cargo workspace at `crates/`:
 
 ```bash
 cargo build --release -p sem-cli     # binary at target/release/sem
-cargo test --workspace               # 44 tests
+cargo test --workspace               # 134 tests
 ```
 
 All cargo commands run from repo root. CI builds from `crates/` directory.
 
 ## Key Paths
 
-- Parsers: `crates/sem-core/src/parser/plugins/` (20 language plugins)
+- Parsers: `crates/sem-core/src/parser/plugins/` (23 language plugins + shebang detection)
 - Commands: `crates/sem-cli/src/commands/`
 - Entity model: `crates/sem-core/src/model/`
 - Git integration: `crates/sem-core/src/git/`
