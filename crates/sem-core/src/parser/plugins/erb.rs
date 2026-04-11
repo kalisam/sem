@@ -241,7 +241,10 @@ fn truncate_name(s: &str) -> String {
     if s.len() <= 60 {
         s.to_string()
     } else {
-        let boundary = s.floor_char_boundary(57);
+        let mut boundary = 57.min(s.len());
+        while boundary > 0 && !s.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
         format!("{}...", &s[..boundary])
     }
 }

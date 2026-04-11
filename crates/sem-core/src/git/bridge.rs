@@ -51,25 +51,18 @@ impl GitBridge {
         Ok(oid.to_string())
     }
 
-    /// Combined detect scope + get files in one call (fast path)
+    /// Combined detect scope + get files in one call (fast path).
+    /// Matches `git diff` behavior: shows working tree changes by default.
+    /// Use `--staged` for staged changes only.
     pub fn detect_and_get_files(&self, pathspecs: &[String]) -> Result<(DiffScope, Vec<FileChange>), GitError> {
-        // Check for staged changes
-        let staged_files = self.get_staged_diff_files(pathspecs)?;
-        if !staged_files.is_empty() {
-            let mut files = staged_files;
-            self.populate_contents(&mut files, &DiffScope::Staged)?;
-            return Ok((DiffScope::Staged, files));
-        }
-
-        // Check for working tree changes (match git diff: no untracked files)
+        // Show working tree changes (unstaged), matching git diff behavior
         let mut working_files = self.get_working_diff_files(pathspecs)?;
-
         if !working_files.is_empty() {
             self.populate_contents(&mut working_files, &DiffScope::Working)?;
             return Ok((DiffScope::Working, working_files));
         }
 
-        // A clean worktree should report no live changes.
+        // Clean worktree = no changes
         Ok((DiffScope::Working, Vec::new()))
     }
 
