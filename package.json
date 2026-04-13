@@ -11,6 +11,7 @@
     "bin/sem.js",
     "scripts/package-meta.mjs",
     "scripts/postinstall.mjs",
+    "scripts/verify-checksum.mjs",
     "scripts/sync-package-version.mjs",
     "README.md",
     "LICENSE-APACHE",
