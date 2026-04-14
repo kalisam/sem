@@ -599,7 +599,7 @@ static OCAML_INTERFACE_CONFIG: LanguageConfig = LanguageConfig {
 
 static SCALA_CONFIG: LanguageConfig = LanguageConfig {
     id: "scala",
-    extensions: &[".scala", ".sc"],
+    extensions: &[".scala", ".sc", ".sbt", ".kojo", ".mill"],
     entity_node_types: &[
         "class_definition",
         "object_definition",
@@ -666,7 +666,7 @@ pub fn get_all_code_extensions() -> &'static [&'static str] {
         ".dart",
         ".pl", ".pm", ".t",
         ".ml", ".mli",
-        ".scala", ".sc",
+        ".scala", ".sc", ".sbt", ".kojo", ".mill",
     ];
     EXTENSIONS
 }
