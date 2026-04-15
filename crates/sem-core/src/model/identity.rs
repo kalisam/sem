@@ -330,6 +330,36 @@ pub fn match_entities(
         });
     }
 
+    // Deduplicate: when a parent (class) is Modified and one or more of its
+    // children (methods) are also Modified, drop the parent. The child diffs
+    // are more specific and the parent body overlaps with them.
+    // Only applies to Modified; Added/Deleted should still show all entities.
+    let modified_ids: HashSet<&str> = changes
+        .iter()
+        .filter(|c| c.change_type == ChangeType::Modified)
+        .map(|c| c.entity_id.as_str())
+        .collect();
+
+    if modified_ids.len() > 1 {
+        let mut parents_to_remove: HashSet<&str> = HashSet::new();
+        for entity in after.iter().chain(before.iter()) {
+            if let Some(ref pid) = entity.parent_id {
+                if modified_ids.contains(entity.id.as_str())
+                    && modified_ids.contains(pid.as_str())
+                {
+                    parents_to_remove.insert(pid.as_str());
+                }
+            }
+        }
+
+        if !parents_to_remove.is_empty() {
+            changes.retain(|c| {
+                !(c.change_type == ChangeType::Modified
+                    && parents_to_remove.contains(c.entity_id.as_str()))
+            });
+        }
+    }
+
     MatchResult { changes }
 }
 
@@ -417,6 +447,141 @@ mod tests {
         let result = match_entities(&before, &after, "a.ts", None, None, None);
         assert_eq!(result.changes.len(), 1);
         assert_eq!(result.changes[0].change_type, ChangeType::Renamed);
+    }
+
+    #[test]
+    fn test_parent_child_dedup_class_method() {
+        // Class entity contains the method body in its content.
+        // parent_id stores the full entity ID of the parent.
+        let class_before = SemanticEntity {
+            id: "a.ts::class::DataStack".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "class".to_string(),
+            name: "DataStack".to_string(),
+            parent_id: None,
+            content: "class DataStack { constructor() {} genPg() { old } }".to_string(),
+            content_hash: content_hash("class DataStack { constructor() {} genPg() { old } }"),
+            structural_hash: None,
+            start_line: 1,
+            end_line: 10,
+            metadata: None,
+        };
+        let method_before = SemanticEntity {
+            id: "a.ts::a.ts::class::DataStack::genPg".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "method".to_string(),
+            name: "genPg".to_string(),
+            parent_id: Some("a.ts::class::DataStack".to_string()),
+            content: "genPg() { old }".to_string(),
+            content_hash: content_hash("genPg() { old }"),
+            structural_hash: None,
+            start_line: 5,
+            end_line: 8,
+            metadata: None,
+        };
+
+        let class_after = SemanticEntity {
+            id: "a.ts::class::DataStack".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "class".to_string(),
+            name: "DataStack".to_string(),
+            parent_id: None,
+            content: "class DataStack { constructor() {} genPg() { new } }".to_string(),
+            content_hash: content_hash("class DataStack { constructor() {} genPg() { new } }"),
+            structural_hash: None,
+            start_line: 1,
+            end_line: 10,
+            metadata: None,
+        };
+        let method_after = SemanticEntity {
+            id: "a.ts::a.ts::class::DataStack::genPg".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "method".to_string(),
+            name: "genPg".to_string(),
+            parent_id: Some("a.ts::class::DataStack".to_string()),
+            content: "genPg() { new }".to_string(),
+            content_hash: content_hash("genPg() { new }"),
+            structural_hash: None,
+            start_line: 5,
+            end_line: 8,
+            metadata: None,
+        };
+
+        let before = vec![class_before, method_before];
+        let after = vec![class_after, method_after];
+        let result = match_entities(&before, &after, "a.ts", None, None, None);
+
+        // Should only report the method change, not the class
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].entity_name, "genPg");
+        assert_eq!(result.changes[0].change_type, ChangeType::Modified);
+    }
+
+    #[test]
+    fn test_parent_not_deduped_when_no_child_changes() {
+        // Only the class-level content changes (e.g. a field added), no method changes
+        let class_before = SemanticEntity {
+            id: "a.ts::class::Foo".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "class".to_string(),
+            name: "Foo".to_string(),
+            parent_id: None,
+            content: "class Foo { bar() {} }".to_string(),
+            content_hash: content_hash("class Foo { bar() {} }"),
+            structural_hash: None,
+            start_line: 1,
+            end_line: 5,
+            metadata: None,
+        };
+        let method_before = SemanticEntity {
+            id: "a.ts::a.ts::class::Foo::bar".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "method".to_string(),
+            name: "bar".to_string(),
+            parent_id: Some("a.ts::class::Foo".to_string()),
+            content: "bar() {}".to_string(),
+            content_hash: content_hash("bar() {}"),
+            structural_hash: None,
+            start_line: 2,
+            end_line: 4,
+            metadata: None,
+        };
+
+        let class_after = SemanticEntity {
+            id: "a.ts::class::Foo".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "class".to_string(),
+            name: "Foo".to_string(),
+            parent_id: None,
+            content: "class Foo { x = 1; bar() {} }".to_string(),
+            content_hash: content_hash("class Foo { x = 1; bar() {} }"),
+            structural_hash: None,
+            start_line: 1,
+            end_line: 6,
+            metadata: None,
+        };
+        let method_after = SemanticEntity {
+            id: "a.ts::a.ts::class::Foo::bar".to_string(),
+            file_path: "a.ts".to_string(),
+            entity_type: "method".to_string(),
+            name: "bar".to_string(),
+            parent_id: Some("a.ts::class::Foo".to_string()),
+            content: "bar() {}".to_string(),
+            content_hash: content_hash("bar() {}"),
+            structural_hash: None,
+            start_line: 3,
+            end_line: 5,
+            metadata: None,
+        };
+
+        let before = vec![class_before, method_before];
+        let after = vec![class_after, method_after];
+        let result = match_entities(&before, &after, "a.ts", None, None, None);
+
+        // Class changed but method didn't, so class should still appear
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].entity_name, "Foo");
+        assert_eq!(result.changes[0].change_type, ChangeType::Modified);
     }
 
     #[test]
