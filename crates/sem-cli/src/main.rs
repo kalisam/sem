@@ -82,6 +82,10 @@ enum Commands {
         /// When to use colors: always, auto, never
         #[arg(long, default_value = "auto")]
         color: ColorMode,
+
+        /// Run as if started in this directory (like git -C)
+        #[arg(short = 'C', long = "cwd")]
+        directory: Option<String>,
     },
     /// Show impact of changing an entity (deps, dependents, transitive impact, tests)
     Impact {
@@ -225,6 +229,7 @@ fn main() {
             profile,
             file_exts,
             color,
+            directory,
         }) => {
             apply_color_mode(color);
             let output_format = match format.as_str() {
@@ -234,11 +239,15 @@ fn main() {
                 _ => OutputFormat::Terminal,
             };
 
-            diff_command(DiffOptions {
-                cwd: std::env::current_dir()
+            let cwd = directory.unwrap_or_else(|| {
+                std::env::current_dir()
                     .unwrap_or_default()
                     .to_string_lossy()
-                    .to_string(),
+                    .to_string()
+            });
+
+            diff_command(DiffOptions {
+                cwd,
                 format: output_format,
                 staged: staged || cached,
                 commit,
