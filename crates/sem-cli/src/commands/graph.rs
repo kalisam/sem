@@ -64,6 +64,7 @@ pub fn extract_all_entities(root: &Path, file_paths: &[String], registry: &Parse
 }
 
 /// Build the entity graph + entities, using the disk cache when possible.
+/// Tries: full cache hit → incremental rebuild (stale files only) → full rebuild.
 pub fn get_or_build_graph(
     root: &Path,
     file_paths: &[String],
@@ -71,20 +72,39 @@ pub fn get_or_build_graph(
     no_cache: bool,
 ) -> (EntityGraph, Vec<SemanticEntity>) {
     if !no_cache {
-        // Try loading from cache
         if let Ok(disk) = DiskCache::open(root) {
+            // Try full cache hit
             if let Some(cached) = disk.load(root, file_paths) {
                 return cached;
+            }
+
+            // Try incremental: load clean cached data, rebuild only stale files
+            if let Some(partial) = disk.load_partial(root, file_paths) {
+                let (graph, entities) = EntityGraph::build_incremental(
+                    root,
+                    &partial.stale_files,
+                    file_paths,
+                    partial.cached_entities,
+                    partial.cached_edges,
+                    registry,
+                );
+                let _ = disk.save_incremental(
+                    root,
+                    file_paths,
+                    &partial.stale_files,
+                    &graph,
+                    &entities,
+                );
+                return (graph, entities);
             }
         }
     }
 
-    // Cache miss (or --no-cache): build from scratch
+    // Full rebuild
     let graph = EntityGraph::build(root, file_paths, registry);
     let entities = extract_all_entities(root, file_paths, registry);
 
     if !no_cache {
-        // Best-effort save
         if let Ok(disk) = DiskCache::open(root) {
             let _ = disk.save(root, file_paths, &graph, &entities);
         }

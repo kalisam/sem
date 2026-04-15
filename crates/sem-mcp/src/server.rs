@@ -243,9 +243,39 @@ impl SemServer {
             }
         }
 
-        // Check SQLite cache
+        // Check SQLite cache (full hit, then incremental)
         if let Ok(disk) = cache::DiskCache::open(repo_root) {
+            // Full cache hit
             if let Some((graph, entities)) = disk.load(repo_root, file_paths) {
+                let graph = Arc::new(graph);
+                let entities = Arc::new(entities);
+                let mut guard = self.graph_cache.lock().await;
+                *guard = Some(CachedGraph {
+                    manifest_hash,
+                    graph: graph.clone(),
+                    entities: entities.clone(),
+                });
+                return (graph, entities);
+            }
+
+            // Incremental: load clean cached data, rebuild only stale files
+            if let Some(partial) = disk.load_partial(repo_root, file_paths) {
+                let (graph, entities) = EntityGraph::build_incremental(
+                    repo_root,
+                    &partial.stale_files,
+                    file_paths,
+                    partial.cached_entities,
+                    partial.cached_edges,
+                    &self.registry,
+                );
+                let _ = disk.save_incremental(
+                    repo_root,
+                    file_paths,
+                    &partial.stale_files,
+                    &graph,
+                    &entities,
+                );
+
                 let graph = Arc::new(graph);
                 let entities = Arc::new(entities);
                 let mut guard = self.graph_cache.lock().await;

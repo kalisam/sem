@@ -1,10 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use rusqlite::{params, Connection};
 use sem_core::model::entity::SemanticEntity;
 use sem_core::parser::graph::{EntityGraph, EntityInfo, EntityRef, RefType};
+
+/// Result of a partial cache load: stale files that need reparsing, plus cached clean data.
+pub struct PartialCache {
+    pub stale_files: Vec<String>,
+    pub cached_entities: Vec<SemanticEntity>,
+    pub cached_edges: Vec<EntityRef>,
+}
 
 /// Compute a manifest hash from file paths + mtimes.
 /// If any file can't be stat'd, returns None.
@@ -246,5 +253,246 @@ impl DiskCache {
 
         let graph = EntityGraph::from_parts(entity_map, edges);
         Some((graph, entities))
+    }
+
+    /// Load a partial cache: identify stale files and return clean cached data.
+    /// Returns None if cache is empty or ALL files are stale (full rebuild is better).
+    pub fn load_partial(
+        &self,
+        root: &Path,
+        files: &[String],
+    ) -> Option<PartialCache> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, mtime_secs, mtime_nanos FROM files")
+            .ok()?;
+        let cached_files: HashMap<String, (i64, i64)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+                ))
+            })
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if cached_files.is_empty() {
+            return None;
+        }
+
+        let current_set: HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
+
+        let mut stale_files: Vec<String> = Vec::new();
+        for file in files {
+            match cached_files.get(file) {
+                Some(&(secs, nanos)) => {
+                    let full = root.join(file);
+                    let meta = std::fs::metadata(&full).ok();
+                    let is_stale = meta
+                        .and_then(|m| m.modified().ok())
+                        .map(|mtime| {
+                            let dur = mtime
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default();
+                            secs != dur.as_secs() as i64 || nanos != dur.subsec_nanos() as i64
+                        })
+                        .unwrap_or(true);
+                    if is_stale {
+                        stale_files.push(file.clone());
+                    }
+                }
+                None => {
+                    stale_files.push(file.clone());
+                }
+            }
+        }
+
+        // Files in cache but not on disk anymore
+        for cached_path in cached_files.keys() {
+            if !current_set.contains(cached_path.as_str()) {
+                stale_files.push(cached_path.clone());
+            }
+        }
+
+        if stale_files.is_empty() {
+            return None;
+        }
+
+        if stale_files.len() >= files.len() {
+            return None;
+        }
+
+        let stale_set: HashSet<&str> = stale_files.iter().map(|s| s.as_str()).collect();
+
+        let mut entity_stmt = self
+            .conn
+            .prepare("SELECT id, name, entity_type, file_path, start_line, end_line, content, content_hash, structural_hash, parent_id, metadata_json FROM entities")
+            .ok()?;
+        let cached_entities: Vec<SemanticEntity> = entity_stmt
+            .query_map([], |row| {
+                let metadata_json: Option<String> = row.get(10)?;
+                let metadata = metadata_json.and_then(|j| serde_json::from_str(&j).ok());
+                Ok(SemanticEntity {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    entity_type: row.get(2)?,
+                    file_path: row.get(3)?,
+                    start_line: row.get::<_, i64>(4)? as usize,
+                    end_line: row.get::<_, i64>(5)? as usize,
+                    content: row.get(6)?,
+                    content_hash: row.get(7)?,
+                    structural_hash: row.get(8)?,
+                    parent_id: row.get(9)?,
+                    metadata,
+                })
+            })
+            .ok()?
+            .filter_map(|r| r.ok())
+            .filter(|e| !stale_set.contains(e.file_path.as_str()))
+            .collect();
+
+        let clean_entity_ids: HashSet<String> = cached_entities.iter().map(|e| e.id.clone()).collect();
+        let mut edge_stmt = self
+            .conn
+            .prepare("SELECT from_entity, to_entity, ref_type FROM edges")
+            .ok()?;
+        let cached_edges: Vec<EntityRef> = edge_stmt
+            .query_map([], |row| {
+                let rt: String = row.get(2)?;
+                let ref_type = match rt.as_str() {
+                    "calls" => RefType::Calls,
+                    "imports" => RefType::Imports,
+                    _ => RefType::TypeRef,
+                };
+                Ok(EntityRef {
+                    from_entity: row.get(0)?,
+                    to_entity: row.get(1)?,
+                    ref_type,
+                })
+            })
+            .ok()?
+            .filter_map(|r| r.ok())
+            .filter(|e| {
+                clean_entity_ids.contains(&e.from_entity)
+                    && clean_entity_ids.contains(&e.to_entity)
+            })
+            .collect();
+
+        let stale_files: Vec<String> = stale_files
+            .into_iter()
+            .filter(|f| current_set.contains(f.as_str()))
+            .collect();
+
+        Some(PartialCache {
+            stale_files,
+            cached_entities,
+            cached_edges,
+        })
+    }
+
+    /// Incrementally update the cache: only rewrite stale file entries.
+    pub fn save_incremental(
+        &self,
+        root: &Path,
+        all_files: &[String],
+        stale_files: &[String],
+        graph: &EntityGraph,
+        entities: &[SemanticEntity],
+    ) -> Result<(), rusqlite::Error> {
+        let stale_set: HashSet<&str> = stale_files.iter().map(|s| s.as_str()).collect();
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        {
+            let mut del_files = tx.prepare("DELETE FROM files WHERE path = ?1")?;
+            for f in stale_files {
+                del_files.execute(params![f])?;
+            }
+        }
+
+        {
+            let current_set: HashSet<&str> = all_files.iter().map(|s| s.as_str()).collect();
+            let mut cached_stmt = tx.prepare("SELECT path FROM files")?;
+            let cached_paths: Vec<String> = cached_stmt
+                .query_map([], |row| row.get(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default();
+            let mut del_files = tx.prepare("DELETE FROM files WHERE path = ?1")?;
+            for path in &cached_paths {
+                if !current_set.contains(path.as_str()) {
+                    del_files.execute(params![path])?;
+                }
+            }
+        }
+
+        {
+            let mut ins = tx.prepare(
+                "INSERT OR REPLACE INTO files (path, mtime_secs, mtime_nanos) VALUES (?1, ?2, ?3)",
+            )?;
+            for file in stale_files {
+                let full = root.join(file);
+                if let Ok(meta) = std::fs::metadata(&full) {
+                    if let Ok(mtime) = meta.modified() {
+                        let dur = mtime
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        ins.execute(params![file, dur.as_secs() as i64, dur.subsec_nanos() as i64])?;
+                    }
+                }
+            }
+        }
+
+        {
+            let mut del = tx.prepare("DELETE FROM entities WHERE file_path = ?1")?;
+            for f in stale_files {
+                del.execute(params![f])?;
+            }
+        }
+
+        {
+            let mut ins = tx.prepare(
+                "INSERT OR REPLACE INTO entities (id, name, entity_type, file_path, start_line, end_line, content, content_hash, structural_hash, parent_id, metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+            for e in entities {
+                if stale_set.contains(e.file_path.as_str()) {
+                    let metadata_json = e
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| serde_json::to_string(m).ok());
+                    ins.execute(params![
+                        e.id,
+                        e.name,
+                        e.entity_type,
+                        e.file_path,
+                        e.start_line as i64,
+                        e.end_line as i64,
+                        e.content,
+                        e.content_hash,
+                        e.structural_hash,
+                        e.parent_id,
+                        metadata_json,
+                    ])?;
+                }
+            }
+        }
+
+        tx.execute("DELETE FROM edges", [])?;
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO edges (from_entity, to_entity, ref_type) VALUES (?1, ?2, ?3)",
+            )?;
+            for edge in &graph.edges {
+                let rt = match edge.ref_type {
+                    RefType::Calls => "calls",
+                    RefType::TypeRef => "typeref",
+                    RefType::Imports => "imports",
+                };
+                ins.execute(params![edge.from_entity, edge.to_entity, rt])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 }

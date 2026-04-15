@@ -360,6 +360,340 @@ impl EntityGraph {
         }
     }
 
+    /// Incrementally build an entity graph: reparse only stale files, reuse cached data for clean files.
+    ///
+    /// Uses the same full 3-phase resolution (scope + dot-chain + bag-of-words) as `build()`,
+    /// but only runs it for entities in stale files + clean entities whose cached edges
+    /// pointed into stale files (they need re-resolution since their targets may have changed).
+    pub fn build_incremental(
+        root: &Path,
+        stale_files: &[String],
+        all_file_paths: &[String],
+        cached_entities: Vec<SemanticEntity>,
+        cached_edges: Vec<EntityRef>,
+        registry: &ParserRegistry,
+    ) -> (Self, Vec<SemanticEntity>) {
+        // Build set of stale file paths for quick lookup
+        let stale_set: HashSet<&str> = stale_files.iter().map(|s| s.as_str()).collect();
+
+        // Parse stale files in parallel to get new entities
+        let new_entities: Vec<SemanticEntity> = stale_files
+            .par_iter()
+            .filter_map(|file_path| {
+                let full_path = root.join(file_path);
+                let content = std::fs::read_to_string(&full_path).ok()?;
+                let plugin = registry.get_plugin_with_content(file_path, &content)?;
+                Some(plugin.extract_entities(&content, file_path))
+            })
+            .flatten()
+            .collect();
+
+        // Merge: cached (clean) entities + new (stale) entities
+        let all_entities: Vec<SemanticEntity> = cached_entities
+            .into_iter()
+            .chain(new_entities.into_iter())
+            .collect();
+
+        // Collect stale entity IDs
+        let stale_entity_ids: HashSet<&str> = all_entities
+            .iter()
+            .filter(|e| stale_set.contains(e.file_path.as_str()))
+            .map(|e| e.id.as_str())
+            .collect();
+
+        // Find affected clean entities: those with cached edges pointing to/from stale entities
+        let mut affected_clean_ids: HashSet<String> = HashSet::new();
+        for edge in &cached_edges {
+            if stale_entity_ids.contains(edge.to_entity.as_str()) {
+                if !stale_entity_ids.contains(edge.from_entity.as_str()) {
+                    affected_clean_ids.insert(edge.from_entity.clone());
+                }
+            }
+        }
+
+        // Keep only edges where both endpoints are clean AND from_entity is not affected
+        let kept_edges: Vec<EntityRef> = cached_edges
+            .into_iter()
+            .filter(|e| {
+                !stale_entity_ids.contains(e.from_entity.as_str())
+                    && !stale_entity_ids.contains(e.to_entity.as_str())
+                    && !affected_clean_ids.contains(&e.from_entity)
+            })
+            .collect();
+
+        // Set of entity IDs that need resolution
+        let needs_resolution: HashSet<&str> = all_entities
+            .iter()
+            .filter(|e| {
+                stale_entity_ids.contains(e.id.as_str())
+                    || affected_clean_ids.contains(&e.id)
+            })
+            .map(|e| e.id.as_str())
+            .collect();
+
+        // Now run the same resolution logic as build() but only for entities in needs_resolution.
+        // We still need the full context (symbol table, import table, etc.) from ALL entities.
+
+        // Build symbol table from all entities
+        let mut symbol_table: HashMap<String, Vec<String>> = HashMap::with_capacity(all_entities.len());
+        let mut entity_map: HashMap<String, EntityInfo> = HashMap::with_capacity(all_entities.len());
+
+        for entity in &all_entities {
+            symbol_table
+                .entry(entity.name.clone())
+                .or_default()
+                .push(entity.id.clone());
+            entity_map.insert(
+                entity.id.clone(),
+                EntityInfo {
+                    id: entity.id.clone(),
+                    name: entity.name.clone(),
+                    entity_type: entity.entity_type.clone(),
+                    file_path: entity.file_path.clone(),
+                    parent_id: entity.parent_id.clone(),
+                    start_line: entity.start_line,
+                    end_line: entity.end_line,
+                },
+            );
+        }
+
+        // Build parent-child set
+        let parent_child_pairs: HashSet<(&str, &str)> = all_entities
+            .iter()
+            .filter_map(|e| {
+                e.parent_id.as_ref().map(|pid| (pid.as_str(), e.id.as_str()))
+            })
+            .collect();
+
+        let class_child_names: HashSet<(&str, &str)> = all_entities
+            .iter()
+            .filter_map(|e| {
+                e.parent_id.as_ref().map(|pid| (pid.as_str(), e.name.as_str()))
+            })
+            .collect();
+
+        let class_entity_names: HashSet<&str> = all_entities
+            .iter()
+            .filter(|e| matches!(e.entity_type.as_str(), "class" | "struct" | "interface" | "class_type"))
+            .map(|e| e.name.as_str())
+            .collect();
+
+        let id_to_name: HashMap<&str, &str> = all_entities
+            .iter()
+            .map(|e| (e.id.as_str(), e.name.as_str()))
+            .collect();
+
+        let mut enclosing_class: HashMap<&str, &str> = HashMap::new();
+        let mut class_members: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+
+        for entity in &all_entities {
+            if let Some(ref pid) = entity.parent_id {
+                if let Some(&parent_name) = id_to_name.get(pid.as_str()) {
+                    if class_entity_names.contains(parent_name) {
+                        enclosing_class.insert(entity.id.as_str(), parent_name);
+                        class_members
+                            .entry(parent_name)
+                            .or_default()
+                            .push((entity.name.as_str(), entity.id.as_str()));
+                    }
+                }
+            }
+        }
+
+        // Build import table from ALL files (imports may reference stale entities)
+        let import_table = build_import_table(root, all_file_paths, &symbol_table, &entity_map);
+
+        // Run scope-aware resolver only on files that need resolution
+        let resolve_file_paths: Vec<String> = all_file_paths
+            .iter()
+            .filter(|f| {
+                // Include file if any entity in needs_resolution belongs to it
+                stale_set.contains(f.as_str()) || all_entities.iter().any(|e| {
+                    e.file_path == **f && affected_clean_ids.contains(&e.id)
+                })
+            })
+            .cloned()
+            .collect();
+
+        let has_scope_lang = resolve_file_paths.iter().any(|f| {
+            f.ends_with(".py") || f.ends_with(".ts") || f.ends_with(".tsx")
+                || f.ends_with(".js") || f.ends_with(".jsx")
+                || f.ends_with(".rs") || f.ends_with(".go")
+        });
+        let (scope_edges, scope_resolved_entities) = if has_scope_lang {
+            let result = scope_resolve::resolve_with_scopes(root, &resolve_file_paths, &all_entities, &entity_map);
+            let resolved_entity_ids: HashSet<String> = result.edges.iter()
+                .map(|(from, _, _)| from.clone())
+                .collect();
+            (result.edges, resolved_entity_ids)
+        } else {
+            (vec![], HashSet::new())
+        };
+
+        // Resolve references only for entities in needs_resolution
+        let resolved_refs: Vec<(String, String, RefType)> = all_entities
+            .par_iter()
+            .filter(|e| needs_resolution.contains(e.id.as_str()))
+            .flat_map(|entity| {
+                if scope_resolved_entities.contains(&entity.id) {
+                    return vec![];
+                }
+
+                let mut entity_edges = Vec::new();
+                let mut consumed_words: HashSet<String> = HashSet::new();
+
+                // Phase 1: Dot-chain resolution
+                let stripped = strip_comments_and_strings(&entity.content);
+                let dot_chains = extract_dot_chains(&stripped);
+
+                for (receiver, member) in &dot_chains {
+                    if *receiver == "self" || *receiver == "this" {
+                        if let Some(class_name) = enclosing_class.get(entity.id.as_str()) {
+                            if let Some(members) = class_members.get(class_name) {
+                                for (n, tid) in members {
+                                    if *n == *member && *tid != entity.id.as_str() {
+                                        entity_edges.push((
+                                            entity.id.clone(),
+                                            tid.to_string(),
+                                            RefType::Calls,
+                                        ));
+                                        consumed_words.insert(member.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else if class_entity_names.contains(*receiver) {
+                        if let Some(members) = class_members.get(*receiver) {
+                            for (n, tid) in members {
+                                if *n == *member {
+                                    entity_edges.push((
+                                        entity.id.clone(),
+                                        tid.to_string(),
+                                        RefType::Calls,
+                                    ));
+                                    consumed_words.insert(member.to_string());
+                                    consumed_words.insert(receiver.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Phase 2: Bag-of-words resolution
+                let refs = extract_references_from_content(&entity.content, &entity.name);
+                for ref_name in refs {
+                    if consumed_words.contains(ref_name) {
+                        continue;
+                    }
+                    if class_child_names.contains(&(entity.id.as_str(), ref_name)) {
+                        continue;
+                    }
+
+                    let import_key = (entity.file_path.clone(), ref_name.to_string());
+                    if let Some(import_target_id) = import_table.get(&import_key) {
+                        if import_target_id != &entity.id
+                            && !parent_child_pairs.contains(&(entity.id.as_str(), import_target_id.as_str()))
+                            && !parent_child_pairs.contains(&(import_target_id.as_str(), entity.id.as_str()))
+                        {
+                            let ref_type = infer_ref_type(&entity.content, &ref_name);
+                            entity_edges.push((
+                                entity.id.clone(),
+                                import_target_id.clone(),
+                                ref_type,
+                            ));
+                        }
+                        continue;
+                    }
+
+                    if let Some(target_ids) = symbol_table.get(ref_name) {
+                        let target = target_ids
+                            .iter()
+                            .find(|id| {
+                                *id != &entity.id
+                                    && entity_map
+                                        .get(*id)
+                                        .map_or(false, |e| e.file_path == entity.file_path)
+                            });
+
+                        if let Some(target_id) = target {
+                            if parent_child_pairs.contains(&(entity.id.as_str(), target_id.as_str()))
+                                || parent_child_pairs.contains(&(target_id.as_str(), entity.id.as_str()))
+                            {
+                                continue;
+                            }
+                            let ref_type = infer_ref_type(&entity.content, &ref_name);
+                            entity_edges.push((
+                                entity.id.clone(),
+                                target_id.clone(),
+                                ref_type,
+                            ));
+                        }
+                    }
+                }
+                entity_edges
+            })
+            .collect();
+
+        // Merge scope edges + bag-of-words edges + kept cached edges
+        let mut all_resolved: Vec<(String, String, RefType)> = scope_edges;
+        all_resolved.extend(resolved_refs);
+        let mut seen_edges: HashSet<(String, String)> = HashSet::new();
+        all_resolved.retain(|e| seen_edges.insert((e.0.clone(), e.1.clone())));
+
+        // Build final edge list: kept edges + newly resolved edges
+        let mut edges: Vec<EntityRef> = Vec::with_capacity(kept_edges.len() + all_resolved.len());
+        let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+        let mut dependencies: HashMap<String, Vec<String>> = HashMap::new();
+
+        // Track all edge pairs for dedup
+        let mut all_edge_pairs: HashSet<(String, String)> = HashSet::new();
+
+        // Add kept cached edges
+        for edge in kept_edges {
+            all_edge_pairs.insert((edge.from_entity.clone(), edge.to_entity.clone()));
+            dependents
+                .entry(edge.to_entity.clone())
+                .or_default()
+                .push(edge.from_entity.clone());
+            dependencies
+                .entry(edge.from_entity.clone())
+                .or_default()
+                .push(edge.to_entity.clone());
+            edges.push(edge);
+        }
+
+        // Add newly resolved edges, dedup against kept edges
+        for (from_entity, to_entity, ref_type) in all_resolved {
+            if !all_edge_pairs.insert((from_entity.clone(), to_entity.clone())) {
+                continue;
+            }
+            dependents
+                .entry(to_entity.clone())
+                .or_default()
+                .push(from_entity.clone());
+            dependencies
+                .entry(from_entity.clone())
+                .or_default()
+                .push(to_entity.clone());
+            edges.push(EntityRef {
+                from_entity,
+                to_entity,
+                ref_type,
+            });
+        }
+
+        let graph = EntityGraph {
+            entities: entity_map,
+            edges,
+            dependents,
+            dependencies,
+        };
+
+        (graph, all_entities)
+    }
+
     /// Get entities that depend on the given entity (reverse deps).
     pub fn get_dependents(&self, entity_id: &str) -> Vec<&EntityInfo> {
         self.dependents
