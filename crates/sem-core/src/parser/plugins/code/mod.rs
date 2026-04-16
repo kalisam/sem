@@ -1717,4 +1717,64 @@ type Predicate[A] = A => Boolean
         assert!(names.contains(&"Greeter"), "Should find trait Greeter, got: {:?}", names);
         assert!(names.contains(&"Predicate"), "Should find type alias Predicate, got: {:?}", names);
     }
+
+    #[test]
+    fn test_zig_entity_extraction() {
+        let code = r#"
+const std = @import("std");
+
+pub const Point = struct {
+    x: i32,
+    y: i32,
+};
+
+pub const Color = enum {
+    red,
+    green,
+    blue,
+};
+
+const Person = struct {
+    name: []const u8,
+    age: u32,
+};
+
+pub fn greet(name: []const u8) void {
+    std.debug.print("Hello, {s}!\n", .{name});
+}
+
+fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+
+pub fn main() !void {
+    greet("world");
+}
+
+test "basic addition" {
+    const result = add(2, 3);
+    _ = result;
+}
+"#;
+        let plugin = CodeParserPlugin;
+        let entities = plugin.extract_entities(code, "main.zig");
+        let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+        let types: std::collections::HashMap<&str, &str> = entities
+            .iter()
+            .map(|e| (e.name.as_str(), e.entity_type.as_str()))
+            .collect();
+
+        assert!(names.contains(&"greet"), "Should find greet, got: {:?}", names);
+        assert!(names.contains(&"add"), "Should find add, got: {:?}", names);
+        assert!(names.contains(&"main"), "Should find main, got: {:?}", names);
+        assert!(names.contains(&"Point"), "Should find Point, got: {:?}", names);
+        assert!(names.contains(&"Color"), "Should find Color, got: {:?}", names);
+        assert!(names.contains(&"Person"), "Should find Person, got: {:?}", names);
+
+        assert_eq!(types["greet"], "function");
+        assert_eq!(types["add"], "function");
+        assert_eq!(types["Point"], "struct");
+        assert_eq!(types["Color"], "enum");
+        assert_eq!(types["Person"], "struct");
+    }
 }

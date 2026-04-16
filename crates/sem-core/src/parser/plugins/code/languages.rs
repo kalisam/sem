@@ -116,6 +116,10 @@ fn get_scala() -> Option<Language> {
     Some(tree_sitter_scala::LANGUAGE.into())
 }
 
+fn get_zig() -> Option<Language> {
+    Some(tree_sitter_zig::LANGUAGE.into())
+}
+
 /// Inside JS/TS function bodies, suppress variable declarations so that local
 /// variables are not extracted as nested entities. Inner function/class
 /// declarations are still extracted for diff granularity.
@@ -620,6 +624,26 @@ static SCALA_CONFIG: LanguageConfig = LanguageConfig {
     get_language: get_scala,
 };
 
+static ZIG_CONFIG: LanguageConfig = LanguageConfig {
+    id: "zig",
+    extensions: &[".zig"],
+    entity_node_types: &[
+        "function_declaration",
+        "test_declaration",
+        "variable_declaration",
+    ],
+    container_node_types: &["block"],
+    call_entity_identifiers: &[],
+    suppressed_nested_entities: &[
+        SuppressedNestedEntity {
+            parent_entity_node_type: "function_declaration",
+            child_entity_node_type: "variable_declaration",
+        },
+    ],
+    scope_boundary_types: &[],
+    get_language: get_zig,
+};
+
 static ALL_CONFIGS: &[&LanguageConfig] = &[
     &TYPESCRIPT_CONFIG,
     &TSX_CONFIG,
@@ -645,6 +669,7 @@ static ALL_CONFIGS: &[&LanguageConfig] = &[
     &OCAML_CONFIG,
     &OCAML_INTERFACE_CONFIG,
     &SCALA_CONFIG,
+    &ZIG_CONFIG,
 ];
 
 pub fn get_language_config(extension: &str) -> Option<&'static LanguageConfig> {
@@ -667,6 +692,7 @@ pub fn get_all_code_extensions() -> &'static [&'static str] {
         ".pl", ".pm", ".t",
         ".ml", ".mli",
         ".scala", ".sc", ".sbt", ".kojo", ".mill",
+        ".zig",
     ];
     EXTENSIONS
 }
