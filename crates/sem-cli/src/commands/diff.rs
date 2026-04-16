@@ -228,6 +228,14 @@ fn parse_unified_diff(patch: &str, cwd: &str) -> Vec<FileChange> {
                 after_content = std::fs::read_to_string(&file).ok();
             }
 
+            if before_content.is_none() && after_content.is_none() {
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m could not resolve contents for \x1b[1m{}\x1b[0m. \
+                     Try running from inside the repo, or use \x1b[1m-C /path/to/repo\x1b[0m.",
+                    e.file_path
+                );
+            }
+
             FileChange {
                 file_path: e.file_path,
                 old_file_path: e.old_file_path,
