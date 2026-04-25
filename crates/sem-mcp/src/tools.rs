@@ -3,9 +3,16 @@ use serde::Deserialize;
 // ── Tool parameter structs ──
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EntitiesParams {
-    #[schemars(description = "Path to the file (relative to repo root or absolute)")]
-    pub file_path: String,
+    #[schemars(description = "Optional path to a file or directory. If omitted, defaults to '.'.")]
+    pub path: Option<String>,
+}
+
+impl EntitiesParams {
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref().filter(|p| !p.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -52,4 +59,34 @@ pub struct ContextParams {
     pub entity_name: String,
     #[schemars(description = "Maximum token budget. Defaults to 8000.")]
     pub token_budget: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EntitiesParams;
+
+    #[test]
+    fn entities_params_accepts_path() {
+        let params: EntitiesParams =
+            serde_json::from_value(serde_json::json!({ "path": "src/lib.rs" })).unwrap();
+
+        assert_eq!(params.path(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn entities_params_allows_missing_path() {
+        let params: EntitiesParams = serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert_eq!(params.path(), None);
+    }
+
+    #[test]
+    fn entities_params_rejects_unknown_fields() {
+        let err = serde_json::from_value::<EntitiesParams>(serde_json::json!({
+            "unexpected": "src/lib.rs"
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field"));
+    }
 }
