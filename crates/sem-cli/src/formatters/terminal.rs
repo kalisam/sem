@@ -15,8 +15,8 @@ fn render_inline_diff(old_line: &str, new_line: &str) -> (String, String) {
         let val = change.value();
         match change.tag() {
             ChangeTag::Equal => {
-                del.push_str(&val.red().to_string());
-                ins.push_str(&val.green().to_string());
+                del.push_str(&val.dimmed().to_string());
+                ins.push_str(&val.dimmed().to_string());
             }
             ChangeTag::Delete => {
                 del.push_str(&val.red().strikethrough().bold().to_string());

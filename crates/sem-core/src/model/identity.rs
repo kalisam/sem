@@ -7,6 +7,60 @@ pub struct MatchResult {
     pub changes: Vec<SemanticChange>,
 }
 
+fn classify_match(before: &SemanticEntity, after: &SemanticEntity) -> ChangeType {
+    if before.file_path != after.file_path {
+        ChangeType::Moved
+    } else {
+        ChangeType::Renamed
+    }
+}
+
+fn make_change(
+    after_entity: &SemanticEntity,
+    change_type: ChangeType,
+    before_entity: Option<&SemanticEntity>,
+    commit_sha: Option<&str>,
+    author: Option<&str>,
+) -> SemanticChange {
+    let prefix = match change_type {
+        ChangeType::Added => "added::",
+        ChangeType::Deleted => "deleted::",
+        ChangeType::Reordered => "reordered::",
+        _ => "",
+    };
+    // For deleted entities, use the before entity as the primary source
+    let primary = if change_type == ChangeType::Deleted {
+        before_entity.unwrap_or(after_entity)
+    } else {
+        after_entity
+    };
+    SemanticChange {
+        id: format!("change::{prefix}{}", primary.id),
+        entity_id: primary.id.clone(),
+        change_type,
+        entity_type: primary.entity_type.clone(),
+        entity_name: primary.name.clone(),
+        entity_line: primary.start_line,
+        file_path: primary.file_path.clone(),
+        old_entity_name: before_entity.and_then(|b| {
+            (b.name != after_entity.name).then(|| b.name.clone())
+        }),
+        old_file_path: before_entity.and_then(|b| {
+            (b.file_path != after_entity.file_path).then(|| b.file_path.clone())
+        }),
+        before_content: before_entity.map(|b| b.content.clone()),
+        after_content: if change_type == ChangeType::Deleted || change_type == ChangeType::Reordered {
+            None
+        } else {
+            Some(after_entity.content.clone())
+        },
+        commit_sha: commit_sha.map(String::from),
+        author: author.map(String::from),
+        timestamp: None,
+        structural_change: None,
+    }
+}
+
 /// 3-phase entity matching algorithm:
 /// 1. Exact ID match — same entity ID in before/after → modified or unchanged
 /// 2. Content hash match — same hash, different ID → renamed or moved
@@ -35,27 +89,12 @@ pub fn match_entities(
             matched_after.insert(id);
 
             if before_entity.content_hash != after_entity.content_hash {
-                let structural_change = match (&before_entity.structural_hash, &after_entity.structural_hash) {
+                let mut change = make_change(after_entity, ChangeType::Modified, Some(before_entity), commit_sha, author);
+                change.structural_change = match (&before_entity.structural_hash, &after_entity.structural_hash) {
                     (Some(before_sh), Some(after_sh)) => Some(before_sh != after_sh),
                     _ => None,
                 };
-                changes.push(SemanticChange {
-                    id: format!("change::{id}"),
-                    entity_id: id.to_string(),
-                    change_type: ChangeType::Modified,
-                    entity_type: after_entity.entity_type.clone(),
-                    entity_name: after_entity.name.clone(),
-                    entity_line: after_entity.start_line,
-                    file_path: after_entity.file_path.clone(),
-                    old_entity_name: None,
-                    old_file_path: None,
-                    before_content: Some(before_entity.content.clone()),
-                    after_content: Some(after_entity.content.clone()),
-                    commit_sha: commit_sha.map(String::from),
-                    author: author.map(String::from),
-                    timestamp: None,
-                    structural_change,
-                });
+                changes.push(change);
             }
         }
     }
@@ -118,41 +157,7 @@ pub fn match_entities(
                 continue;
             }
 
-            let change_type = if before_entity.file_path != after_entity.file_path {
-                ChangeType::Moved
-            } else {
-                ChangeType::Renamed
-            };
-
-            let old_file_path = if before_entity.file_path != after_entity.file_path {
-                Some(before_entity.file_path.clone())
-            } else {
-                None
-            };
-
-            let old_entity_name = if before_entity.name != after_entity.name {
-                Some(before_entity.name.clone())
-            } else {
-                None
-            };
-
-            changes.push(SemanticChange {
-                id: format!("change::{}", after_entity.id),
-                entity_id: after_entity.id.clone(),
-                change_type,
-                entity_type: after_entity.entity_type.clone(),
-                entity_name: after_entity.name.clone(),
-                entity_line: after_entity.start_line,
-                file_path: after_entity.file_path.clone(),
-                old_entity_name,
-                old_file_path,
-                before_content: Some(before_entity.content.clone()),
-                after_content: Some(after_entity.content.clone()),
-                commit_sha: commit_sha.map(String::from),
-                author: author.map(String::from),
-                timestamp: None,
-                structural_change: None,
-            });
+            changes.push(make_change(after_entity, classify_match(before_entity, after_entity), Some(before_entity), commit_sha, author));
         }
     }
 
@@ -249,41 +254,7 @@ pub fn match_entities(
                     continue;
                 }
 
-                let change_type = if matched.file_path != after_entity.file_path {
-                    ChangeType::Moved
-                } else {
-                    ChangeType::Renamed
-                };
-
-                let old_file_path = if matched.file_path != after_entity.file_path {
-                    Some(matched.file_path.clone())
-                } else {
-                    None
-                };
-
-                let old_entity_name = if matched.name != after_entity.name {
-                    Some(matched.name.clone())
-                } else {
-                    None
-                };
-
-                changes.push(SemanticChange {
-                    id: format!("change::{}", after_entity.id),
-                    entity_id: after_entity.id.clone(),
-                    change_type,
-                    entity_type: after_entity.entity_type.clone(),
-                    entity_name: after_entity.name.clone(),
-                    entity_line: after_entity.start_line,
-                    file_path: after_entity.file_path.clone(),
-                    old_entity_name,
-                    old_file_path,
-                    before_content: Some(matched.content.clone()),
-                    after_content: Some(after_entity.content.clone()),
-                    commit_sha: commit_sha.map(String::from),
-                    author: author.map(String::from),
-                    timestamp: None,
-                    structural_change: None,
-                });
+                changes.push(make_change(after_entity, classify_match(matched, after_entity), Some(matched), commit_sha, author));
             }
         }
     }
@@ -295,44 +266,12 @@ pub fn match_entities(
 
     // Remaining unmatched before = deleted
     for entity in before.iter().filter(|e| !matched_before.contains(e.id.as_str())) {
-        changes.push(SemanticChange {
-            id: format!("change::deleted::{}", entity.id),
-            entity_id: entity.id.clone(),
-            change_type: ChangeType::Deleted,
-            entity_type: entity.entity_type.clone(),
-            entity_name: entity.name.clone(),
-            entity_line: entity.start_line,
-            file_path: entity.file_path.clone(),
-            old_entity_name: None,
-            old_file_path: None,
-            before_content: Some(entity.content.clone()),
-            after_content: None,
-            commit_sha: commit_sha.map(String::from),
-            author: author.map(String::from),
-            timestamp: None,
-            structural_change: None,
-        });
+        changes.push(make_change(entity, ChangeType::Deleted, Some(entity), commit_sha, author));
     }
 
     // Remaining unmatched after = added
     for entity in after.iter().filter(|e| !matched_after.contains(e.id.as_str())) {
-        changes.push(SemanticChange {
-            id: format!("change::added::{}", entity.id),
-            entity_id: entity.id.clone(),
-            change_type: ChangeType::Added,
-            entity_type: entity.entity_type.clone(),
-            entity_name: entity.name.clone(),
-            entity_line: entity.start_line,
-            file_path: entity.file_path.clone(),
-            old_entity_name: None,
-            old_file_path: None,
-            before_content: None,
-            after_content: Some(entity.content.clone()),
-            commit_sha: commit_sha.map(String::from),
-            author: author.map(String::from),
-            timestamp: None,
-            structural_change: None,
-        });
+        changes.push(make_change(entity, ChangeType::Added, None, commit_sha, author));
     }
 
     // Deduplicate: when a parent (class) is Modified and one or more of its
@@ -459,23 +398,7 @@ fn detect_reorders(
             if lis_set.contains(&i) {
                 continue;
             }
-            changes.push(SemanticChange {
-                id: format!("change::reordered::{}", after_entity.id),
-                entity_id: after_entity.id.clone(),
-                change_type: ChangeType::Reordered,
-                entity_type: after_entity.entity_type.clone(),
-                entity_name: after_entity.name.clone(),
-                entity_line: after_entity.start_line,
-                file_path: after_entity.file_path.clone(),
-                old_entity_name: None,
-                old_file_path: None,
-                before_content: None,
-                after_content: None,
-                commit_sha: commit_sha.map(String::from),
-                author: author.map(String::from),
-                timestamp: None,
-                structural_change: None,
-            });
+            changes.push(make_change(after_entity, ChangeType::Reordered, None, commit_sha, author));
         }
     }
 }
