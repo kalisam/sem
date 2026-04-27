@@ -71,7 +71,24 @@ docker build -t sem .
 docker run --rm -it -u "$(id -u):$(id -g)" -v "$(pwd):/repo" sem diff
 ```
 
-> **Note:** GNU Parallel also installs a `sem` binary (`/usr/bin/sem`). If you have both installed, make sure the sem you want is first in your `$PATH`. Run `sem --version` to check which one you're using. ([#77](https://github.com/Ataraxy-Labs/sem/issues/77))
+## Name conflict with GNU Parallel
+
+GNU Parallel ships a `sem` binary (`/usr/bin/sem`) as a symlink to `parallel`. If you have both installed, they'll collide. Run `sem --version` to check which one you're using. ([#77](https://github.com/Ataraxy-Labs/sem/issues/77))
+
+**Quick fixes:**
+
+```bash
+# Option 1: alias in your shell profile (~/.bashrc, ~/.zshrc)
+alias sem="$HOME/.cargo/bin/sem"
+
+# Option 2: make sure cargo bin comes first in PATH
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Option 3: if installed via Homebrew
+export PATH="$(brew --prefix)/bin:$PATH"
+```
+
+If you installed via npm/bun, the binary lives in `node_modules/.bin/sem` and is invoked through `npx sem` or `bunx sem`, which avoids the conflict entirely.
 
 ## Commands
 
