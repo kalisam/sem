@@ -57,9 +57,7 @@ bun pm trust @ataraxy-labs/sem
 Or build from source (requires Rust):
 
 ```bash
-git clone https://github.com/Ataraxy-Labs/sem
-cd sem/crates
-cargo install --path sem-cli
+cargo install --git https://github.com/Ataraxy-Labs/sem sem-cli
 ```
 
 Or grab a binary from [GitHub Releases](https://github.com/Ataraxy-Labs/sem/releases).
