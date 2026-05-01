@@ -56,11 +56,7 @@ pub fn verify_contracts(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let plugin = match registry.get_plugin_with_content(fp, &content) {
-            Some(p) => p,
-            None => continue,
-        };
-        for entity in plugin.extract_entities(&content, fp) {
+        for entity in registry.extract_entities(fp, &content) {
             content_map.insert(entity.id.clone(), entity.content.clone());
         }
     }

@@ -8,6 +8,20 @@ pub mod log;
 pub mod setup;
 pub mod verify;
 
+use sem_core::parser::plugins::create_default_registry;
+use sem_core::parser::registry::ParserRegistry;
+use std::path::Path;
+
+/// Create a parser registry with extension mappings loaded from `cwd`.
+/// Loads `.semrc` first (takes priority), then `.gitattributes` as fallback.
+pub fn create_registry(cwd: &str) -> ParserRegistry {
+    let mut registry = create_default_registry();
+    let root = Path::new(cwd);
+    registry.load_semrc(root);
+    registry.load_gitattributes(root);
+    registry
+}
+
 /// Truncate a string to `max_chars` Unicode scalar values (codepoints), appending "..." if
 /// truncated. Safe for multibyte encodings (CJK, simple emoji). Note: does not split on grapheme
 /// cluster boundaries — ZWJ emoji sequences may render incorrectly at the truncation point.

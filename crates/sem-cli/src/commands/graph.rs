@@ -3,7 +3,6 @@ use std::path::Path;
 use colored::Colorize;
 use sem_core::model::entity::SemanticEntity;
 use sem_core::parser::graph::EntityGraph;
-use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 
 use crate::cache::DiskCache;
@@ -17,7 +16,7 @@ pub struct GraphOptions {
 
 pub fn graph_command(opts: GraphOptions) {
     let root = Path::new(&opts.cwd);
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
     let ext_filter = normalize_exts(&opts.file_exts);
     let file_paths = find_supported_files_public(root, &registry, &ext_filter);
     let (graph, _entities) = get_or_build_graph(root, &file_paths, &registry, opts.no_cache);
@@ -89,13 +88,14 @@ fn find_supported_files(root: &Path, registry: &ParserRegistry, ext_filter: &[St
 pub fn extract_all_entities(root: &Path, file_paths: &[String], registry: &ParserRegistry) -> Vec<SemanticEntity> {
     file_paths
         .iter()
-        .filter_map(|fp| {
+        .flat_map(|fp| {
             let full = root.join(fp);
-            let content = std::fs::read_to_string(&full).ok()?;
-            let plugin = registry.get_plugin_with_content(fp, &content)?;
-            Some(plugin.extract_entities(&content, fp))
+            let content = match std::fs::read_to_string(&full) {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            };
+            registry.extract_entities(fp, &content)
         })
-        .flatten()
         .collect()
 }
 

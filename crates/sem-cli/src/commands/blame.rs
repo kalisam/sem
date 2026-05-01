@@ -2,7 +2,6 @@ use std::path::Path;
 
 use colored::Colorize;
 use sem_core::git::bridge::GitBridge;
-use sem_core::parser::plugins::create_default_registry;
 
 use super::truncate_str;
 
@@ -25,7 +24,7 @@ struct EntityBlame {
 
 pub fn blame_command(opts: BlameOptions) {
     let root = Path::new(&opts.cwd);
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
 
     // Read file and extract entities
     let full_path = root.join(&opts.file_path);
@@ -37,19 +36,7 @@ pub fn blame_command(opts: BlameOptions) {
         }
     };
 
-    let plugin = match registry.get_plugin_with_content(&opts.file_path, &content) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "{} Unsupported file type: {}",
-                "error:".red().bold(),
-                opts.file_path
-            );
-            std::process::exit(1);
-        }
-    };
-
-    let entities = plugin.extract_entities(&content, &opts.file_path);
+    let entities = registry.extract_entities(&opts.file_path, &content);
     if entities.is_empty() {
         eprintln!("{} No entities found in {}", "warning:".yellow().bold(), opts.file_path);
         return;

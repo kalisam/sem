@@ -7,7 +7,6 @@ use sem_core::git::bridge::GitBridge;
 use sem_core::git::jj::maybe_resolve_ref;
 use sem_core::git::types::{DiffScope, FileChange};
 use sem_core::parser::differ::compute_semantic_diff;
-use sem_core::parser::plugins::create_default_registry;
 
 use crate::formatters::{json::format_json, markdown::format_markdown, plain::format_plain, terminal::format_terminal};
 
@@ -472,7 +471,7 @@ fn run_diff_pipeline(
     }
 
     let t2 = Instant::now();
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
     let registry_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = Instant::now();

@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 use sem_core::model::entity::SemanticEntity;
-use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 
 pub struct EntitiesOptions {
@@ -14,7 +13,7 @@ pub struct EntitiesOptions {
 
 pub fn entities_command(opts: EntitiesOptions) {
     let root = Path::new(&opts.cwd);
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
     let path_arg = opts.path.as_deref().filter(|p| !p.is_empty()).unwrap_or(".");
     let (path_label, full_path) = resolve_path(root, path_arg);
 
@@ -150,13 +149,7 @@ fn extract_file_entities(
     file_path: &str,
 ) -> Result<Vec<SemanticEntity>, std::io::Error> {
     let content = std::fs::read_to_string(&full_path)?;
-
-    let plugin = match registry.get_plugin_with_content(file_path, &content) {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
-
-    Ok(plugin.extract_entities(&content, file_path))
+    Ok(registry.extract_entities(file_path, &content))
 }
 
 fn entity_json(entity: &SemanticEntity, include_file: bool) -> serde_json::Value {
