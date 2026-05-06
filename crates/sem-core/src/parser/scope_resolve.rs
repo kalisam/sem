@@ -14,6 +14,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use rayon::prelude::*;
+
 use crate::model::entity::SemanticEntity;
 use crate::parser::graph::{EntityInfo, RefType};
 use crate::parser::plugins::code::languages::{
@@ -137,9 +139,6 @@ pub fn resolve_with_scopes(
             .push((entity.start_line, entity.end_line, entity.id.clone()));
     }
 
-    // Build import table from AST (not regex)
-    let mut import_table: HashMap<(String, String), String> = HashMap::new();
-
     // Return type map: function_entity_id -> class_name (if function returns ClassName())
     let mut return_type_map: HashMap<String, String> = HashMap::new();
 
@@ -232,137 +231,147 @@ pub fn resolve_with_scopes(
         &mut instance_attr_types,
     );
 
-    // Pass 2: Build scopes, imports, and resolve references per file
-    for (file_path, content, tree) in parsed_files {
-        let source = content.as_bytes();
-        let ext = file_path.rfind('.').map(|i| &file_path[i..]).unwrap_or("");
-        let config = match get_language_config(ext).and_then(|c| c.scope_resolve) {
-            Some(c) => c,
-            None => continue,
-        };
+    // Pass 2: Build scopes, imports, and resolve references per file (parallel)
+    let per_file_results: Vec<(Vec<(String, String, RefType)>, Vec<ResolutionEntry>)> = parsed_files
+        .par_iter()
+        .filter_map(|(file_path, content, tree)| {
+            let source = content.as_bytes();
+            let ext = file_path.rfind('.').map(|i| &file_path[i..]).unwrap_or("");
+            let config = get_language_config(ext).and_then(|c| c.scope_resolve)?;
 
-        let mut scopes: Vec<Scope> = vec![Scope {
-            parent: None,
-            defs: HashMap::new(),
-            types: HashMap::new(),
-            pending_call_types: HashMap::new(),
-            owner_id: None,
-            kind: "module",
-        }];
+            let mut scopes: Vec<Scope> = vec![Scope {
+                parent: None,
+                defs: HashMap::new(),
+                types: HashMap::new(),
+                pending_call_types: HashMap::new(),
+                owner_id: None,
+                kind: "module",
+            }];
 
-        let mut entity_scope_map: HashMap<String, usize> = HashMap::new();
-        let mut entity_inner_scope: HashMap<String, usize> = HashMap::new();
+            let mut entity_scope_map: HashMap<String, usize> = HashMap::new();
+            let mut entity_inner_scope: HashMap<String, usize> = HashMap::new();
 
-        if let Some(ranges) = entity_ranges.get(file_path.as_str()) {
-            for (_start, _end, eid) in ranges {
-                if let Some(info) = entity_map.get(eid) {
-                    if info.parent_id.is_none() {
-                        scopes[0].defs.insert(info.name.clone(), eid.clone());
-                        entity_scope_map.insert(eid.clone(), 0);
+            if let Some(ranges) = entity_ranges.get(file_path.as_str()) {
+                for (_start, _end, eid) in ranges {
+                    if let Some(info) = entity_map.get(eid) {
+                        if info.parent_id.is_none() {
+                            scopes[0].defs.insert(info.name.clone(), eid.clone());
+                            entity_scope_map.insert(eid.clone(), 0);
+                        }
                     }
                 }
             }
-        }
 
-        build_scopes_from_ast(
-            tree.root_node(),
-            0,
-            &mut scopes,
-            &mut entity_scope_map,
-            &mut entity_inner_scope,
-            all_entities,
-            entity_map,
-            file_path,
-            source,
-            config,
-        );
-
-        extract_imports_from_ast(
-            tree.root_node(),
-            file_path,
-            source,
-            &symbol_table,
-            entity_map,
-            &mut import_table,
-            &mut scopes,
-            config,
-        );
-
-        // Resolve pending call types using the complete return type map
-        inject_return_type_bindings(
-            &entity_inner_scope,
-            &mut scopes,
-            &return_type_map,
-            &import_table,
-            file_path,
-            entity_map,
-        );
-
-        let file_entities: Vec<&SemanticEntity> = all_entities
-            .iter()
-            .filter(|e| e.file_path == *file_path)
-            .collect();
-
-        for entity in &file_entities {
-            // Use the entity's inner scope (where local vars live), not the definition scope
-            let scope_idx = entity_inner_scope
-                .get(&entity.id)
-                .or_else(|| entity_scope_map.get(&entity.id))
-                .copied()
-                .unwrap_or(0);
-
-            let refs = extract_ast_refs(
+            build_scopes_from_ast(
                 tree.root_node(),
-                entity,
+                0,
+                &mut scopes,
+                &mut entity_scope_map,
+                &mut entity_inner_scope,
+                all_entities,
+                entity_map,
+                file_path,
                 source,
                 config,
             );
 
-            for ast_ref in refs {
-                let resolution = resolve_ref(
-                    &ast_ref,
-                    scope_idx,
-                    &scopes,
-                    &symbol_table,
-                    &class_members,
-                    &import_table,
-                    &instance_attr_types,
-                    entity_map,
-                    file_path,
-                    &entity.id,
+            let mut local_import_table: HashMap<(String, String), String> = HashMap::new();
+            extract_imports_from_ast(
+                tree.root_node(),
+                file_path,
+                source,
+                &symbol_table,
+                entity_map,
+                &mut local_import_table,
+                &mut scopes,
+                config,
+            );
+
+            // Resolve pending call types using the complete return type map
+            inject_return_type_bindings(
+                &entity_inner_scope,
+                &mut scopes,
+                &return_type_map,
+                &local_import_table,
+                file_path,
+                entity_map,
+            );
+
+            let file_entities: Vec<&SemanticEntity> = all_entities
+                .iter()
+                .filter(|e| e.file_path == *file_path)
+                .collect();
+
+            let mut file_edges: Vec<(String, String, RefType)> = Vec::new();
+            let mut file_log: Vec<ResolutionEntry> = Vec::new();
+
+            for entity in &file_entities {
+                let scope_idx = entity_inner_scope
+                    .get(&entity.id)
+                    .or_else(|| entity_scope_map.get(&entity.id))
+                    .copied()
+                    .unwrap_or(0);
+
+                let refs = extract_ast_refs(
+                    tree.root_node(),
+                    entity,
+                    source,
+                    config,
                 );
 
-                if let Some((target_id, ref_type, method)) = resolution {
-                    if target_id != entity.id {
-                        let is_parent_child = entity
-                            .parent_id
-                            .as_ref()
-                            .map_or(false, |pid| pid == &target_id || entity_map.get(&target_id).map_or(false, |t| t.parent_id.as_ref() == Some(&entity.id)));
+                for ast_ref in refs {
+                    let resolution = resolve_ref(
+                        &ast_ref,
+                        scope_idx,
+                        &scopes,
+                        &symbol_table,
+                        &class_members,
+                        &local_import_table,
+                        &instance_attr_types,
+                        entity_map,
+                        file_path,
+                        &entity.id,
+                    );
 
-                        if !is_parent_child {
-                            all_edges.push((
-                                entity.id.clone(),
-                                target_id.clone(),
-                                ref_type,
-                            ));
-                            log.push(ResolutionEntry {
-                                from_entity: entity.id.clone(),
-                                reference: ref_description(&ast_ref),
-                                resolved_to: Some(target_id),
-                                method,
-                            });
+                    if let Some((target_id, ref_type, method)) = resolution {
+                        if target_id != entity.id {
+                            let is_parent_child = entity
+                                .parent_id
+                                .as_ref()
+                                .map_or(false, |pid| pid == &target_id || entity_map.get(&target_id).map_or(false, |t| t.parent_id.as_ref() == Some(&entity.id)));
+
+                            if !is_parent_child {
+                                file_edges.push((
+                                    entity.id.clone(),
+                                    target_id.clone(),
+                                    ref_type,
+                                ));
+                                file_log.push(ResolutionEntry {
+                                    from_entity: entity.id.clone(),
+                                    reference: ref_description(&ast_ref),
+                                    resolved_to: Some(target_id),
+                                    method,
+                                });
+                            }
                         }
+                    } else {
+                        file_log.push(ResolutionEntry {
+                            from_entity: entity.id.clone(),
+                            reference: ref_description(&ast_ref),
+                            resolved_to: None,
+                            method: "unresolved",
+                        });
                     }
-                } else {
-                    log.push(ResolutionEntry {
-                        from_entity: entity.id.clone(),
-                        reference: ref_description(&ast_ref),
-                        resolved_to: None,
-                        method: "unresolved",
-                    });
                 }
             }
-        }
+
+            Some((file_edges, file_log))
+        })
+        .collect();
+
+    for (file_edges, file_log) in per_file_results {
+        all_edges.extend(file_edges);
+        log.extend(file_log);
     }
 
     // Deduplicate edges
