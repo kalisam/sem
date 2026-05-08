@@ -284,6 +284,10 @@ fn get_zig() -> Option<Language> {
     Some(tree_sitter_zig::LANGUAGE.into())
 }
 
+fn get_nix() -> Option<Language> {
+    Some(tree_sitter_nix::LANGUAGE.into())
+}
+
 /// Inside JS/TS function bodies, suppress variable declarations so that local
 /// variables are not extracted as nested entities. Inner function/class
 /// declarations are still extracted for diff granularity.
@@ -832,6 +836,18 @@ static ZIG_CONFIG: LanguageConfig = LanguageConfig {
     scope_boundary_types: &[],
     get_language: get_zig,
     scope_resolve: Some(&ZIG_SCOPE_CONFIG),
+};
+
+static NIX_CONFIG: LanguageConfig = LanguageConfig {
+    id: "nix",
+    extensions: &[".nix"],
+    entity_node_types: &["binding", "inherit", "inherit_from"],
+    container_node_types: &["binding_set"],
+    call_entity_identifiers: &[],
+    suppressed_nested_entities: &[],
+    scope_boundary_types: &[],
+    get_language: get_nix,
+    scope_resolve: None,
 };
 
 // ─── Scope Resolve Configs for Supported Languages ────────────────────────────
@@ -1495,6 +1511,7 @@ static ALL_CONFIGS: &[&LanguageConfig] = &[
     &OCAML_INTERFACE_CONFIG,
     &SCALA_CONFIG,
     &ZIG_CONFIG,
+    &NIX_CONFIG,
 ];
 
 pub fn get_language_config(extension: &str) -> Option<&'static LanguageConfig> {

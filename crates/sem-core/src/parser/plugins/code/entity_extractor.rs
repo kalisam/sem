@@ -410,6 +410,13 @@ fn find_name_byte_range(node: Node, _source: &[u8]) -> Option<(usize, usize)> {
         }
     }
 
+    // Nix bindings: name is in the attrpath field
+    if node_type == "binding" {
+        if let Some(attrpath) = node.child_by_field_name("attrpath") {
+            return Some((attrpath.start_byte(), attrpath.end_byte()));
+        }
+    }
+
     // OCaml: individual binding nodes (used when compute_structural_hash is called
     // on a binding directly, e.g., from the multi-binding extraction in visit_node)
     if node_type == "let_binding" {
@@ -756,6 +763,26 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
         }
     }
 
+    // Nix bindings: name comes from attrpath field, which contains identifier children.
+    // Join multiple identifiers with dots for nested paths (e.g., "services.nginx.enable").
+    if node_type == "binding" {
+        if let Some(attrpath) = node.child_by_field_name("attrpath") {
+            let mut parts = Vec::new();
+            let mut cursor = attrpath.walk();
+            for child in attrpath.children(&mut cursor) {
+                if child.kind() == "identifier" || child.kind() == "string_expression" {
+                    if let Ok(text) = child.utf8_text(source) {
+                        parts.push(text.trim_matches('"').to_string());
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                return Some(parts.join("."));
+            }
+        }
+        return None;
+    }
+
     // For HCL blocks, combine block type with labels (e.g., resource.cloudflare_record.dns)
     if node_type == "block" {
         let mut parts = Vec::new();
@@ -913,6 +940,8 @@ fn map_node_type(tree_sitter_type: &str) -> &str {
         "export_statement" => "export",
         "lexical_declaration" | "variable_declaration" | "var_declaration" | "declaration" => "variable",
         "const_declaration" | "const_item" => "constant",
+        "binding" => "binding",
+        "inherit" | "inherit_from" => "inherit",
         "static_item" => "static",
         "value_specification" => "val",
         "module_type_definition" => "module_type",
