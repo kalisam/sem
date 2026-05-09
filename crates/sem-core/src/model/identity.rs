@@ -8,8 +8,12 @@ fn parent_name(
     by_id: &HashMap<&str, &SemanticEntity>,
 ) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
+    let mut visited: HashSet<&str> = HashSet::new();
     let mut pid = entity.parent_id.as_deref()?;
     loop {
+        if !visited.insert(pid) {
+            break;
+        }
         match by_id.get(pid) {
             Some(parent) => {
                 // Skip ancestors with empty names (e.g. JSON's empty-string
@@ -764,5 +768,23 @@ mod tests {
         let score = default_similarity(&a, &b);
         assert!(score > 0.5);
         assert!(score < 1.0);
+    }
+
+    #[test]
+    fn parent_name_terminates_on_cyclic_parent_id() {
+        // Two entities whose parent_id chains form a cycle. parent_name
+        // would loop forever without the visited-set guard.
+        let a = make_entity_with_parent("A", "A", "", "f", Some("B"));
+        let b = make_entity_with_parent("B", "B", "", "f", Some("A"));
+        let mut by_id: HashMap<&str, &SemanticEntity> = HashMap::new();
+        by_id.insert("A", &a);
+        by_id.insert("B", &b);
+        // Synthesize a leaf whose parent_id enters the cycle via A.
+        let leaf = make_entity_with_parent("L", "L", "", "f", Some("A"));
+        let chain = parent_name(&leaf, &by_id);
+        // Must terminate. We don't assert exact contents — order/composition
+        // depends on which side of the cycle is reached first; the safety
+        // property is "this returns at all."
+        assert!(chain.is_some());
     }
 }

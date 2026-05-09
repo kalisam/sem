@@ -136,8 +136,10 @@ fn extract_object_value(content: &str) -> Option<&str> {
     let brace_offset = after_colon.find('{')?;
     let obj_start = colon_pos? + 1 + brace_offset;
 
-    // Find the matching `}`
-    let mut depth = 0usize;
+    // Find the matching `}`. Track brace and bracket depth separately so
+    // that a `}` only terminates extraction when no array is still open.
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
     in_string = false;
     escape_next = false;
 
@@ -156,16 +158,15 @@ fn extract_object_value(content: &str) -> Option<&str> {
         }
         if !in_string {
             match ch {
-                '{' | '[' => depth += 1,
+                '{' => brace_depth += 1,
+                '[' => bracket_depth += 1,
                 '}' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
+                    brace_depth = brace_depth.saturating_sub(1);
+                    if brace_depth == 0 && bracket_depth == 0 {
                         return Some(&content[obj_start..obj_start + i + 1]);
                     }
                 }
-                ']' => {
-                    depth = depth.saturating_sub(1);
-                }
+                ']' => bracket_depth = bracket_depth.saturating_sub(1),
                 _ => {}
             }
         }
