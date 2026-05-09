@@ -3,10 +3,39 @@ use std::collections::{HashMap, HashSet};
 use super::change::{ChangeType, SemanticChange};
 use super::entity::SemanticEntity;
 
-/// Extracts the leaf name from a parent_id string (last "::" segment).
-fn parent_name(entity: &SemanticEntity) -> Option<String> {
-    let pid = entity.parent_id.as_ref()?;
-    pid.rsplit("::").next().map(String::from)
+fn parent_name(
+    entity: &SemanticEntity,
+    by_id: &HashMap<&str, &SemanticEntity>,
+) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut pid = entity.parent_id.as_deref()?;
+    loop {
+        if !visited.insert(pid) {
+            break;
+        }
+        match by_id.get(pid) {
+            Some(parent) => {
+                // Skip ancestors with empty names (e.g. JSON's empty-string
+                // root-package key in package-lock.json). The full path is
+                // still recoverable from entity_id; the displayed chain is
+                // for human readability.
+                if !parent.name.is_empty() {
+                    parts.push(parent.name.as_str());
+                }
+                match parent.parent_id.as_deref() {
+                    Some(next) => pid = next,
+                    None => break,
+                }
+            }
+            None => break,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.reverse();
+    Some(parts.join("::"))
 }
 
 pub struct MatchResult {
@@ -29,6 +58,7 @@ fn make_change(
     before_entity: Option<&SemanticEntity>,
     commit_sha: Option<&str>,
     author: Option<&str>,
+    by_id: &HashMap<&str, &SemanticEntity>,
 ) -> SemanticChange {
     let prefix = match change_type {
         ChangeType::Added => "added::",
@@ -49,7 +79,7 @@ fn make_change(
         entity_type: primary.entity_type.clone(),
         entity_name: primary.name.clone(),
         entity_line: primary.start_line,
-        parent_name: parent_name(primary),
+        parent_name: parent_name(primary, by_id),
         file_path: primary.file_path.clone(),
         old_entity_name: before_entity.and_then(|b| {
             (b.name != after_entity.name).then(|| b.name.clone())
@@ -94,6 +124,14 @@ pub fn match_entities(
     let after_by_id: HashMap<&str, &SemanticEntity> =
         after.iter().map(|e| (e.id.as_str(), e)).collect();
 
+    // Combined map for ancestor-chain lookup: after takes precedence so the
+    // displayed path reflects the post-change tree for non-deleted entities.
+    let combined_by_id: HashMap<&str, &SemanticEntity> = before
+        .iter()
+        .map(|e| (e.id.as_str(), e))
+        .chain(after.iter().map(|e| (e.id.as_str(), e)))
+        .collect();
+
     // Phase 1: Exact ID match
     for (&id, after_entity) in &after_by_id {
         if let Some(before_entity) = before_by_id.get(id) {
@@ -101,7 +139,7 @@ pub fn match_entities(
             matched_after.insert(id);
 
             if before_entity.content_hash != after_entity.content_hash {
-                let mut change = make_change(after_entity, ChangeType::Modified, Some(before_entity), commit_sha, author);
+                let mut change = make_change(after_entity, ChangeType::Modified, Some(before_entity), commit_sha, author, &combined_by_id);
                 change.structural_change = match (&before_entity.structural_hash, &after_entity.structural_hash) {
                     (Some(before_sh), Some(after_sh)) => Some(before_sh != after_sh),
                     _ => None,
@@ -171,7 +209,7 @@ pub fn match_entities(
                 continue;
             }
 
-            changes.push(make_change(after_entity, classify_match(before_entity, after_entity), Some(before_entity), commit_sha, author));
+            changes.push(make_change(after_entity, classify_match(before_entity, after_entity), Some(before_entity), commit_sha, author, &combined_by_id));
         }
     }
 
@@ -269,7 +307,7 @@ pub fn match_entities(
                     continue;
                 }
 
-                changes.push(make_change(after_entity, classify_match(matched, after_entity), Some(matched), commit_sha, author));
+                changes.push(make_change(after_entity, classify_match(matched, after_entity), Some(matched), commit_sha, author, &combined_by_id));
             }
         }
     }
@@ -277,16 +315,16 @@ pub fn match_entities(
     // Phase 4: Intra-file reorder detection
     // For entities that matched by exact ID with identical content (unchanged),
     // check if their relative ordering changed within the file.
-    detect_reorders(before, after, &matched_before, &matched_after, &mut changes, commit_sha, author);
+    detect_reorders(before, after, &matched_before, &matched_after, &mut changes, commit_sha, author, &combined_by_id);
 
     // Remaining unmatched before = deleted
     for entity in before.iter().filter(|e| !matched_before.contains(e.id.as_str())) {
-        changes.push(make_change(entity, ChangeType::Deleted, Some(entity), commit_sha, author));
+        changes.push(make_change(entity, ChangeType::Deleted, Some(entity), commit_sha, author, &combined_by_id));
     }
 
     // Remaining unmatched after = added
     for entity in after.iter().filter(|e| !matched_after.contains(e.id.as_str())) {
-        changes.push(make_change(entity, ChangeType::Added, None, commit_sha, author));
+        changes.push(make_change(entity, ChangeType::Added, None, commit_sha, author, &combined_by_id));
     }
 
     MatchResult { changes }
@@ -333,6 +371,7 @@ fn detect_reorders(
     changes: &mut Vec<SemanticChange>,
     commit_sha: Option<&str>,
     author: Option<&str>,
+    by_id: &HashMap<&str, &SemanticEntity>,
 ) {
     // Collect unchanged entities: matched by ID with same content_hash
     let before_by_id: HashMap<&str, &SemanticEntity> =
@@ -383,7 +422,7 @@ fn detect_reorders(
             if lis_set.contains(&i) {
                 continue;
             }
-            changes.push(make_change(after_entity, ChangeType::Reordered, None, commit_sha, author));
+            changes.push(make_change(after_entity, ChangeType::Reordered, None, commit_sha, author, by_id));
         }
     }
 }
@@ -729,5 +768,23 @@ mod tests {
         let score = default_similarity(&a, &b);
         assert!(score > 0.5);
         assert!(score < 1.0);
+    }
+
+    #[test]
+    fn parent_name_terminates_on_cyclic_parent_id() {
+        // Two entities whose parent_id chains form a cycle. parent_name
+        // would loop forever without the visited-set guard.
+        let a = make_entity_with_parent("A", "A", "", "f", Some("B"));
+        let b = make_entity_with_parent("B", "B", "", "f", Some("A"));
+        let mut by_id: HashMap<&str, &SemanticEntity> = HashMap::new();
+        by_id.insert("A", &a);
+        by_id.insert("B", &b);
+        // Synthesize a leaf whose parent_id enters the cycle via A.
+        let leaf = make_entity_with_parent("L", "L", "", "f", Some("A"));
+        let chain = parent_name(&leaf, &by_id);
+        // Must terminate. We don't assert exact contents — order/composition
+        // depends on which side of the cycle is reached first; the safety
+        // property is "this returns at all."
+        assert!(chain.is_some());
     }
 }
