@@ -14,95 +14,94 @@ impl SemanticParserPlugin for JsonParserPlugin {
     }
 
     fn extract_entities(&self, content: &str, file_path: &str) -> Vec<SemanticEntity> {
-        let trimmed = content.trim();
-        if !trimmed.starts_with('{') {
+        if !content.trim().starts_with('{') {
             return Vec::new();
         }
-
-        let mut entities = Vec::new();
-        extract_entries_recursive(content, file_path, 1, None, None, &mut entities);
-        entities
+        extract_entries(content, file_path)
     }
 }
 
-/// Recursively extract entities from a JSON object string.
-///
-/// - `content`: the full text of the object (including surrounding `{` `}`)
-/// - `file_path`: original file path, threaded through for entity IDs
-/// - `line_offset`: 1-based absolute line number of the first line of `content`
-/// - `parent_pointer`: JSON Pointer prefix for children, e.g. `Some("/scripts")`
-/// - `parent_entity_id`: the entity id of the enclosing entity (for `parent_id` field)
-/// - `out`: collected entities, appended in-place (DFS pre-order)
-fn extract_entries_recursive(
-    content: &str,
-    file_path: &str,
+struct Frame {
+    content: String,
+    entries: Vec<JsonEntry>,
+    cursor: usize,
     line_offset: usize,
-    parent_pointer: Option<&str>,
-    parent_entity_id: Option<&str>,
-    out: &mut Vec<SemanticEntity>,
-) {
-    let lines: Vec<&str> = content.lines().collect();
-    let entries = find_top_level_entries(content);
+    parent_pointer: Option<String>,
+    parent_entity_id: Option<String>,
+}
 
-    for (i, entry) in entries.iter().enumerate() {
-        let end_line = if i + 1 < entries.len() {
-            let next_start = entries[i + 1].start_line;
-            trim_trailing_blanks(&lines, entry.start_line, next_start)
-        } else {
-            let closing = find_closing_brace_line(&lines);
-            trim_trailing_blanks(&lines, entry.start_line, closing)
-        };
+/// Iterative walk of the JSON tree, emitting entities in DFS pre-order.
+/// Frames track a cursor through their entries; encountering an
+/// object-valued entry pushes both the parent frame (resumed after) and the
+/// child frame (visited next), so children appear before later siblings.
+fn extract_entries(content: &str, file_path: &str) -> Vec<SemanticEntity> {
+    let mut entities = Vec::new();
+    let root_entries = find_top_level_entries(content);
+    let mut worklist: Vec<Frame> = vec![Frame {
+        content: content.to_string(),
+        entries: root_entries,
+        cursor: 0,
+        line_offset: 1,
+        parent_pointer: None,
+        parent_entity_id: None,
+    }];
 
-        let entity_content = lines[entry.start_line - 1..end_line].join("\n");
+    while let Some(mut frame) = worklist.pop() {
+        let lines: Vec<&str> = frame.content.lines().collect();
+        let closing = find_closing_brace_line(&lines);
 
-        let value_content = extract_value_content(&entity_content);
-        let structural_hash = Some(content_hash(value_content));
+        while frame.cursor < frame.entries.len() {
+            let i = frame.cursor;
+            frame.cursor += 1;
+            let entry = &frame.entries[i];
+            let next_boundary = frame.entries.get(i + 1).map(|e| e.start_line).unwrap_or(closing);
+            let end_line = trim_trailing_blanks(&lines, entry.start_line, next_boundary);
 
-        // Build JSON Pointer path: parent_pointer + "/" + escaped_key
-        let pointer = match parent_pointer {
-            Some(pp) => format!("{pp}{}", entry.pointer),
-            None => entry.pointer.clone(),
-        };
+            let entity_content = lines[entry.start_line - 1..end_line].join("\n");
+            let value_content = extract_value_content(&entity_content);
 
-        let abs_start = line_offset + entry.start_line - 1;
-        let abs_end = line_offset + end_line - 1;
+            let pointer = match &frame.parent_pointer {
+                Some(pp) => format!("{pp}{}", entry.pointer),
+                None => entry.pointer.clone(),
+            };
+            let entity_id = format!("{}::{}", file_path, pointer);
+            let abs_start = frame.line_offset + entry.start_line - 1;
+            let abs_end = frame.line_offset + end_line - 1;
 
-        // JSON entity IDs are file::pointer — entity_type is intentionally not
-        // part of the ID so that scalar↔object value-type changes match as Modified.
-        let entity_id = format!("{}::{}", file_path, pointer);
+            entities.push(SemanticEntity {
+                id: entity_id.clone(),
+                file_path: file_path.to_string(),
+                entity_type: entry.entity_type.clone(),
+                name: entry.key.clone(),
+                parent_id: frame.parent_entity_id.clone(),
+                content_hash: content_hash(&entity_content),
+                structural_hash: Some(content_hash(value_content)),
+                content: entity_content.clone(),
+                start_line: abs_start,
+                end_line: abs_end,
+                metadata: None,
+            });
 
-        out.push(SemanticEntity {
-            id: entity_id.clone(),
-            file_path: file_path.to_string(),
-            entity_type: entry.entity_type.clone(),
-            name: entry.key.clone(),
-            parent_id: parent_entity_id.map(str::to_string),
-            content_hash: content_hash(&entity_content),
-            structural_hash,
-            content: entity_content.clone(),
-            start_line: abs_start,
-            end_line: abs_end,
-            metadata: None,
-        });
-
-        // If this entry is an object, recurse into its value
-        if entry.entity_type == "object" {
-            if let Some(obj_str) = extract_object_value(&entity_content) {
-                // The object value starts at the line with the opening `{`.
-                // We need to find the absolute line of that `{` inside entity_content.
-                let obj_line_in_entity = find_value_start_line(&entity_content);
-                let obj_abs_line = abs_start + obj_line_in_entity - 1;
-                extract_entries_recursive(
-                    obj_str,
-                    file_path,
-                    obj_abs_line,
-                    Some(&pointer),
-                    Some(&entity_id),
-                    out,
-                );
+            if entry.entity_type == "object" {
+                if let Some(obj_str) = extract_object_value(&entity_content) {
+                    let obj_line_in_entity = find_value_start_line(&entity_content);
+                    let child = Frame {
+                        content: obj_str.to_string(),
+                        entries: find_top_level_entries(obj_str),
+                        cursor: 0,
+                        line_offset: abs_start + obj_line_in_entity - 1,
+                        parent_pointer: Some(pointer),
+                        parent_entity_id: Some(entity_id),
+                    };
+                    worklist.push(frame);
+                    worklist.push(child);
+                    break;
+                }
             }
         }
     }
+
+    entities
 }
 
 /// Given an entity content string like `  "scripts": {\n    "build": "tsc"\n  }`,
@@ -158,11 +157,14 @@ fn extract_object_value(content: &str) -> Option<&str> {
         if !in_string {
             match ch {
                 '{' | '[' => depth += 1,
-                '}' | ']' => {
-                    depth -= 1;
+                '}' => {
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
                         return Some(&content[obj_start..obj_start + i + 1]);
                     }
+                }
+                ']' => {
+                    depth = depth.saturating_sub(1);
                 }
                 _ => {}
             }
@@ -794,25 +796,6 @@ mod tests {
         assert_eq!(build.entity_id, "test.json::/scripts/build");
     }
 
-    #[test]
-    fn key_with_slash_is_pointer_escaped_in_entity_id() {
-        let changes = json_diff(
-            "{\n  \"a/b\": 1\n}",
-            "{\n  \"a/b\": 2\n}",
-        );
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].entity_id, "test.json::/a~1b");
-    }
-
-    #[test]
-    fn key_with_tilde_is_pointer_escaped_in_entity_id() {
-        let changes = json_diff(
-            "{\n  \"a~b\": 1\n}",
-            "{\n  \"a~b\": 2\n}",
-        );
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].entity_id, "test.json::/a~0b");
-    }
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Phase 3 fuzzy matching
@@ -883,24 +866,18 @@ mod tests {
     }
 
     #[test]
-    fn scalar_to_array_transition_reports_modified_only() {
-        // Arrays are opaque so no children are produced on either side.
-        let changes = json_diff(
-            "{\n  \"deps\": \"react\"\n}",
-            "{\n  \"deps\": [\"react\", \"vue\"]\n}",
-        );
-        assert_eq!(names(&changes), vec![("deps".into(), ChangeType::Modified)]);
-        assert_eq!(changes[0].entity_type, "array");
-    }
-
-    #[test]
-    fn array_to_scalar_transition_reports_modified_only() {
-        let changes = json_diff(
-            "{\n  \"deps\": [\"react\", \"vue\"]\n}",
-            "{\n  \"deps\": \"react\"\n}",
-        );
-        assert_eq!(names(&changes), vec![("deps".into(), ChangeType::Modified)]);
-        assert_eq!(changes[0].entity_type, "property");
+    fn scalar_array_transitions_report_modified_only() {
+        // Arrays are opaque, so the type transition surfaces as a single
+        // Modified entry with entity_type reflecting the after value.
+        let cases = [
+            ("{\n  \"deps\": \"react\"\n}", "{\n  \"deps\": [\"react\", \"vue\"]\n}", "array"),
+            ("{\n  \"deps\": [\"react\", \"vue\"]\n}", "{\n  \"deps\": \"react\"\n}", "property"),
+        ];
+        for (before, after, after_type) in cases {
+            let changes = json_diff(before, after);
+            assert_eq!(names(&changes), vec![("deps".into(), ChangeType::Modified)]);
+            assert_eq!(changes[0].entity_type, after_type);
+        }
     }
 
     #[test]
@@ -939,15 +916,22 @@ mod tests {
     }
 
     #[test]
-    fn key_with_both_tilde_and_slash_is_pointer_escaped_in_correct_order() {
-        // Per RFC 6901, '~' must be escaped before '/' so 'a~/b' becomes
-        // 'a~0~1b' — not 'a~01b' which would happen if '/' were escaped first.
-        let changes = json_diff(
-            "{\n  \"a~/b\": 1\n}",
-            "{\n  \"a~/b\": 2\n}",
-        );
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].entity_id, "test.json::/a~0~1b");
+    fn pointer_escapes_preserve_rfc6901_order() {
+        // '~' must be escaped before '/'. Otherwise a literal '/' would become
+        // '~1' and the '~' inside that would then become '~01'.
+        let cases = [
+            ("a/b", "test.json::/a~1b"),
+            ("a~b", "test.json::/a~0b"),
+            ("a~/b", "test.json::/a~0~1b"),
+        ];
+        for (key, expected_id) in cases {
+            let changes = json_diff(
+                &format!("{{\n  \"{key}\": 1\n}}"),
+                &format!("{{\n  \"{key}\": 2\n}}"),
+            );
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].entity_id, expected_id, "key {key}");
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -955,24 +939,31 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn root_array_document_produces_no_entities() {
+    fn documents_without_extractable_keys_produce_no_entities() {
         let plugin = JsonParserPlugin;
-        let entities = plugin.extract_entities("[1, 2, 3]", "test.json");
-        assert!(entities.is_empty());
+        for input in ["[1, 2, 3]", "\"hello\"", "42", "null", "{}"] {
+            assert!(
+                plugin.extract_entities(input, "test.json").is_empty(),
+                "input: {input}"
+            );
+        }
     }
 
     #[test]
-    fn root_scalar_document_produces_no_entities() {
+    fn malformed_input_does_not_panic() {
         let plugin = JsonParserPlugin;
-        assert!(plugin.extract_entities("\"hello\"", "test.json").is_empty());
-        assert!(plugin.extract_entities("42", "test.json").is_empty());
-        assert!(plugin.extract_entities("null", "test.json").is_empty());
-    }
-
-    #[test]
-    fn empty_root_object_produces_no_entities() {
-        let plugin = JsonParserPlugin;
-        assert!(plugin.extract_entities("{}", "test.json").is_empty());
+        let cases = [
+            "{",                                 // unclosed root
+            "{\"a\":",                           // dangling colon
+            "{\"a\": {",                         // unclosed nested object
+            "{\"a\": {] }}",                     // stray ']' inside object value
+            "{\"a\": {\"b\": [}]}",              // mismatched brackets in array
+            "{\"a\": }}}}",                      // multiple stray '}'
+            "{\"a\": {\"b\": 1}, \"c\":",        // truncated mid-object
+        ];
+        for input in cases {
+            let _ = plugin.extract_entities(input, "test.json");
+        }
     }
 
     #[test]
