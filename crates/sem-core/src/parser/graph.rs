@@ -108,8 +108,7 @@ impl EntityGraph {
             .filter_map(|file_path| {
                 let full_path = root.join(file_path);
                 let content = std::fs::read_to_string(&full_path).ok()?;
-                let plugin = registry.get_plugin_with_content(file_path, &content)?;
-                let (entities, tree) = plugin.extract_entities_with_tree(&content, file_path);
+                let (entities, tree) = registry.extract_entities_with_tree(file_path, &content)?;
                 let parsed = tree.map(|t| (file_path.clone(), content, t));
                 Some((entities, parsed))
             })
@@ -397,8 +396,7 @@ impl EntityGraph {
             .filter_map(|file_path| {
                 let full_path = root.join(file_path);
                 let content = std::fs::read_to_string(&full_path).ok()?;
-                let plugin = registry.get_plugin_with_content(file_path, &content)?;
-                let (entities, tree) = plugin.extract_entities_with_tree(&content, file_path);
+                let (entities, tree) = registry.extract_entities_with_tree(file_path, &content)?;
                 let parsed = tree.map(|t| (file_path.clone(), content, t));
                 Some((entities, parsed))
             })
@@ -1076,9 +1074,7 @@ impl EntityGraph {
             std::fs::read_to_string(&full_path).ok()?
         };
 
-        let plugin = registry.get_plugin_with_content(file_path, &content)?;
-
-        Some(plugin.extract_entities(&content, file_path))
+        Some(registry.extract_entities(file_path, &content))
     }
 
     /// Remove all entities belonging to a specific file and prune their edges.

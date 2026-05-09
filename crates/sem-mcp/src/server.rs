@@ -1,5 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -178,7 +179,11 @@ impl SemServer {
         let mut entities = Vec::new();
         for rel_path in file_paths {
             let abs_path = root.join(rel_path);
-            let content = Self::read_file_at(&abs_path, rel_path)?;
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(content) => content,
+                Err(err) if err.kind() == ErrorKind::InvalidData => continue,
+                Err(err) => return Err(format!("Failed to read {}: {}", rel_path, err)),
+            };
             entities.extend(self.cached_extract_entities(&content, rel_path).await);
         }
         Ok(entities)

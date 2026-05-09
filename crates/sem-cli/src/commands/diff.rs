@@ -7,7 +7,6 @@ use sem_core::git::bridge::GitBridge;
 use sem_core::git::jj::maybe_resolve_ref;
 use sem_core::git::types::{DiffScope, FileChange};
 use sem_core::parser::differ::compute_semantic_diff;
-use sem_core::parser::plugins::create_default_registry;
 
 use crate::formatters::{json::format_json, markdown::format_markdown, plain::format_plain, terminal::format_terminal};
 
@@ -131,6 +130,15 @@ fn parse_args(args: Vec<String>) -> ParsedArgs {
         // Two refs → range
         return ParsedArgs {
             scope: Some(ParsedScope::Range(a.clone(), b.clone())),
+            pathspecs,
+        };
+    }
+
+    // Git external diff protocol: path old-file old-hex old-mode new-file new-hex new-mode
+    // When sem is set as diff.external, git passes 7 positional args per file.
+    if refs.len() == 7 {
+        return ParsedArgs {
+            scope: Some(ParsedScope::FileCompare(refs[1].clone(), refs[4].clone())),
             pathspecs,
         };
     }
@@ -296,15 +304,6 @@ pub fn diff_command(mut opts: DiffOptions) {
             process::exit(1);
         });
         (changes, true)
-    } else if opts.patch {
-        // Read unified diff from stdin and parse it
-        let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input).unwrap_or_else(|e| {
-            eprintln!("\x1b[31mError reading stdin: {e}\x1b[0m");
-            process::exit(1);
-        });
-        let changes = parse_unified_diff(&input, &opts.cwd);
-        (changes, true)
     } else if let Some(ParsedScope::FileCompare(ref a, ref b)) = parsed.scope {
         // Compare two arbitrary files: sem diff file1.ts file2.ts
         let path_a = Path::new(a);
@@ -341,6 +340,15 @@ pub fn diff_command(mut opts: DiffOptions) {
             after_content: Some(content_b),
         };
         (vec![change], false)
+    } else if opts.patch {
+        // Read unified diff from stdin and parse it
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap_or_else(|e| {
+            eprintln!("\x1b[31mError reading stdin: {e}\x1b[0m");
+            process::exit(1);
+        });
+        let changes = parse_unified_diff(&input, &opts.cwd);
+        (changes, true)
     } else {
         let git = match GitBridge::open(Path::new(&opts.cwd)) {
             Ok(g) => g,
@@ -472,7 +480,7 @@ fn run_diff_pipeline(
     }
 
     let t2 = Instant::now();
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
     let registry_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = Instant::now();

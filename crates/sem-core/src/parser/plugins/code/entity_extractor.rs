@@ -24,260 +24,250 @@ pub fn extract_entities(
 }
 
 fn visit_node(
-    node: Node,
+    root: Node,
     file_path: &str,
     config: &LanguageConfig,
     entities: &mut Vec<SemanticEntity>,
-    parent_id: Option<&str>,
+    root_parent_id: Option<&str>,
     source: &[u8],
-    suppression_context: Option<&str>,
+    root_suppression: Option<&str>,
 ) {
-    let node_type = node.kind();
+    // Iterative worklist to avoid stack overflow on deeply nested ASTs.
+    // Fixes: https://github.com/Ataraxy-Labs/sem/issues/103
+    // Each entry: (node, parent_id, suppression_context)
+    let mut worklist: Vec<(Node, Option<String>, Option<String>)> = vec![(
+        root,
+        root_parent_id.map(str::to_owned),
+        root_suppression.map(str::to_owned),
+    )];
 
-    // Handle call-based entities (Elixir: def, defmodule, etc.)
-    if node_type == "call" && !config.call_entity_identifiers.is_empty() {
-        if let Some((name, entity_type)) = extract_call_entity(node, config, source) {
-            let content_str = node_text(node, source);
-            let content = content_str.to_string();
-            let struct_hash = compute_structural_hash(node, source);
-            let entity = SemanticEntity {
-                id: build_entity_id(file_path, entity_type, &name, parent_id),
-                file_path: file_path.to_string(),
-                entity_type: entity_type.to_string(),
-                name: name.clone(),
-                parent_id: parent_id.map(String::from),
-                content_hash: content_hash(&content),
-                structural_hash: Some(struct_hash),
-                content,
-                start_line: node.start_position().row + 1,
-                end_line: node.end_position().row + 1,
-                metadata: None,
-            };
+    while let Some((node, pid_owned, sup_owned)) = worklist.pop() {
+        let parent_id = pid_owned.as_deref();
+        let suppression_context = sup_owned.as_deref();
+        let node_type = node.kind();
 
-            let entity_id = entity.id.clone();
-            entities.push(entity);
-
-            // Visit container children for nested entities (defs inside defmodule)
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if config.container_node_types.contains(&child.kind()) {
-                    let mut inner_cursor = child.walk();
-                    for nested in child.named_children(&mut inner_cursor) {
-                        visit_node(
-                            nested,
-                            file_path,
-                            config,
-                            entities,
-                            Some(&entity_id),
-                            source,
-                            suppression_context,
-                        );
-                    }
-                }
-            }
-            return;
-        }
-    }
-
-    // OCaml: value_definition, module_definition, class_definition, and
-    // class_type_definition can each contain multiple bindings via `... and ...`.
-    // Extract each binding as a separate entity.
-    if node_type == "value_definition" && config.entity_node_types.contains(&node_type) {
-        let mut cursor = node.walk();
-        let bindings: Vec<_> = node.named_children(&mut cursor)
-            .filter(|c| c.kind() == "let_binding")
-            .collect();
-        if !bindings.is_empty() {
-            for binding in bindings {
-                let names = extract_ocaml_let_binding_names(binding, source);
-                let entity_type = map_ocaml_let_binding(binding);
-                let content_str = node_text(binding, source);
+        // Handle call-based entities (Elixir: def, defmodule, etc.)
+        if node_type == "call" && !config.call_entity_identifiers.is_empty() {
+            if let Some((name, entity_type)) = extract_call_entity(node, config, source) {
+                let content_str = node_text(node, source);
                 let content = content_str.to_string();
-                let struct_hash = compute_structural_hash(binding, source);
-                for name in names {
-                    let entity = SemanticEntity {
-                        id: build_entity_id(file_path, entity_type, &name, parent_id),
-                        file_path: file_path.to_string(),
-                        entity_type: entity_type.to_string(),
-                        name,
-                        parent_id: parent_id.map(String::from),
-                        content_hash: content_hash(&content),
-                        structural_hash: Some(struct_hash.clone()),
-                        content: content.clone(),
-                        start_line: binding.start_position().row + 1,
-                        end_line: binding.end_position().row + 1,
-                        metadata: None,
-                    };
-                    entities.push(entity);
-                }
-            }
-            return;
-        }
-    }
-
-    if node_type == "module_definition" && config.entity_node_types.contains(&node_type) {
-        let extracted = extract_ocaml_named_bindings(
-            node, "module_binding", "module_name",
-            map_node_type(node_type), file_path, parent_id, source, config, entities,
-        );
-        if extracted { return; }
-    }
-
-    if node_type == "class_definition" && config.entity_node_types.contains(&node_type) {
-        let extracted = extract_ocaml_named_bindings(
-            node, "class_binding", "class_name",
-            map_node_type(node_type), file_path, parent_id, source, config, entities,
-        );
-        if extracted { return; }
-    }
-
-    if node_type == "class_type_definition" && config.entity_node_types.contains(&node_type) {
-        let extracted = extract_ocaml_named_bindings(
-            node, "class_type_binding", "class_type_name",
-            map_node_type(node_type), file_path, parent_id, source, config, entities,
-        );
-        if extracted { return; }
-    }
-
-    if config.entity_node_types.contains(&node_type) {
-        if let Some(name) = extract_name(node, source) {
-            let name = qualify_hcl_name(&name, node_type, parent_id, suppression_context);
-            let entity_type = map_entity_type(node, config);
-            let should_skip = should_skip_entity(config, suppression_context, node_type);
-            if !should_skip {
-                // Go method_declaration: extract receiver type for parent linkage.
-                // e.g. `func (t *Transaction) Execute(...)` -> parent is Transaction struct
-                let effective_parent = if node_type == "method_declaration" && parent_id.is_none() {
-                    extract_go_receiver_struct(node, source, file_path, entities)
-                } else {
-                    None
-                };
-                let parent_ref = effective_parent.as_deref().or(parent_id);
-
-                // Dart top-level signatures are split from their body node.
-                // When a sibling function_body exists, extend the entity to
-                // cover the full definition so body changes are detected.
-                let body = if config.id == "dart" { sibling_function_body(node) } else { None };
-                let end_byte = body.map_or(node.end_byte(), |b| b.end_byte());
-                let end_line =
-                    body.map_or(node.end_position().row + 1, |b| b.end_position().row + 1);
-
-                // Extend start backward to include outer attributes (e.g. Rust
-                // #[derive(...)], #[cfg(...)], #[test]) so attribute changes
-                // are captured as part of the entity diff.
-                let (start_byte, start_line) =
-                    preceding_attributes_start(node, config).map_or(
-                        (node.start_byte(), node.start_position().row + 1),
-                        |(sb, sr)| (sb, sr + 1),
-                    );
-
-                let content = std::str::from_utf8(&source[start_byte..end_byte])
-                    .unwrap_or("")
-                    .to_string();
-                let struct_hash = match body {
-                    Some(b) => {
-                        let sig = compute_structural_hash(node, source);
-                        let bod = structural_hash(b, source);
-                        content_hash(&format!("{}{}", sig, bod))
-                    }
-                    None => compute_structural_hash(node, source),
-                };
-
+                let struct_hash = compute_structural_hash(node, source);
                 let entity = SemanticEntity {
-                    id: build_entity_id(file_path, entity_type, &name, parent_ref),
+                    id: build_entity_id(file_path, entity_type, &name, parent_id),
                     file_path: file_path.to_string(),
                     entity_type: entity_type.to_string(),
                     name: name.clone(),
-                    parent_id: parent_ref.map(String::from),
+                    parent_id: parent_id.map(String::from),
                     content_hash: content_hash(&content),
                     structural_hash: Some(struct_hash),
                     content,
-                    start_line,
-                    end_line,
+                    start_line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
                     metadata: None,
                 };
 
                 let entity_id = entity.id.clone();
                 entities.push(entity);
 
-                // Visit children for nested entities (methods inside classes, etc.)
-                let next_suppression_context = Some(node_type);
+                // Visit container children for nested entities (defs inside defmodule)
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
                     if config.container_node_types.contains(&child.kind()) {
                         let mut inner_cursor = child.walk();
-                        for nested in child.named_children(&mut inner_cursor) {
-                            visit_node(
-                                nested,
-                                file_path,
-                                config,
-                                entities,
-                                Some(&entity_id),
-                                source,
-                                next_suppression_context,
-                            );
+                        let nested: Vec<_> = child.named_children(&mut inner_cursor).collect();
+                        for n in nested.into_iter().rev() {
+                            worklist.push((n, Some(entity_id.clone()), sup_owned.clone()));
                         }
                     }
                 }
+                continue;
+            }
+        }
 
-                // For variable declarations, also traverse into initializers
-                // that are scope boundaries (arrow functions, function expressions)
-                // so that inner class/function declarations are extracted.
-                if node_type == "lexical_declaration" || node_type == "variable_declaration" {
-                    let mut vd_cursor = node.walk();
-                    for child in node.named_children(&mut vd_cursor) {
-                        if child.kind() == "variable_declarator" {
-                            if let Some(value) = child.child_by_field_name("value") {
-                                if config.scope_boundary_types.contains(&value.kind()) {
-                                    visit_node(
-                                        value,
-                                        file_path,
-                                        config,
-                                        entities,
-                                        Some(&entity_id),
-                                        source,
-                                        Some(value.kind()),
-                                    );
+        // OCaml: value_definition, module_definition, class_definition, and
+        // class_type_definition can each contain multiple bindings via `... and ...`.
+        // Extract each binding as a separate entity.
+        if node_type == "value_definition" && config.entity_node_types.contains(&node_type) {
+            let mut cursor = node.walk();
+            let bindings: Vec<_> = node.named_children(&mut cursor)
+                .filter(|c| c.kind() == "let_binding")
+                .collect();
+            if !bindings.is_empty() {
+                for binding in bindings {
+                    let names = extract_ocaml_let_binding_names(binding, source);
+                    let entity_type = map_ocaml_let_binding(binding);
+                    let content_str = node_text(binding, source);
+                    let content = content_str.to_string();
+                    let struct_hash = compute_structural_hash(binding, source);
+                    for name in names {
+                        let entity = SemanticEntity {
+                            id: build_entity_id(file_path, entity_type, &name, parent_id),
+                            file_path: file_path.to_string(),
+                            entity_type: entity_type.to_string(),
+                            name,
+                            parent_id: parent_id.map(String::from),
+                            content_hash: content_hash(&content),
+                            structural_hash: Some(struct_hash.clone()),
+                            content: content.clone(),
+                            start_line: binding.start_position().row + 1,
+                            end_line: binding.end_position().row + 1,
+                            metadata: None,
+                        };
+                        entities.push(entity);
+                    }
+                }
+                continue;
+            }
+        }
+
+        if node_type == "module_definition" && config.entity_node_types.contains(&node_type) {
+            let extracted = extract_ocaml_named_bindings(
+                node, "module_binding", "module_name",
+                map_node_type(node_type), file_path, parent_id, source, config, entities,
+            );
+            if extracted { continue; }
+        }
+
+        if node_type == "class_definition" && config.entity_node_types.contains(&node_type) {
+            let extracted = extract_ocaml_named_bindings(
+                node, "class_binding", "class_name",
+                map_node_type(node_type), file_path, parent_id, source, config, entities,
+            );
+            if extracted { continue; }
+        }
+
+        if node_type == "class_type_definition" && config.entity_node_types.contains(&node_type) {
+            let extracted = extract_ocaml_named_bindings(
+                node, "class_type_binding", "class_type_name",
+                map_node_type(node_type), file_path, parent_id, source, config, entities,
+            );
+            if extracted { continue; }
+        }
+
+        if config.entity_node_types.contains(&node_type) {
+            if let Some(name) = extract_name(node, source) {
+                let name = qualify_hcl_name(&name, node_type, parent_id, suppression_context);
+                let entity_type = map_entity_type(node, config);
+                let should_skip = should_skip_entity(config, suppression_context, node_type);
+                if !should_skip {
+                    // Go method_declaration: extract receiver type for parent linkage.
+                    // e.g. `func (t *Transaction) Execute(...)` -> parent is Transaction struct
+                    let effective_parent = if node_type == "method_declaration" && parent_id.is_none() {
+                        extract_go_receiver_struct(node, source, file_path, entities)
+                    } else {
+                        None
+                    };
+                    let parent_ref = effective_parent.as_deref().or(parent_id);
+
+                    // Dart top-level signatures are split from their body node.
+                    // When a sibling function_body exists, extend the entity to
+                    // cover the full definition so body changes are detected.
+                    let body = if config.id == "dart" { sibling_function_body(node) } else { None };
+                    let end_byte = body.map_or(node.end_byte(), |b| b.end_byte());
+                    let end_line =
+                        body.map_or(node.end_position().row + 1, |b| b.end_position().row + 1);
+
+                    // Extend start backward to include outer attributes (e.g. Rust
+                    // #[derive(...)], #[cfg(...)], #[test]) so attribute changes
+                    // are captured as part of the entity diff.
+                    let (start_byte, start_line) =
+                        preceding_attributes_start(node, config).map_or(
+                            (node.start_byte(), node.start_position().row + 1),
+                            |(sb, sr)| (sb, sr + 1),
+                        );
+
+                    let content = std::str::from_utf8(&source[start_byte..end_byte])
+                        .unwrap_or("")
+                        .to_string();
+                    let struct_hash = match body {
+                        Some(b) => {
+                            let sig = compute_structural_hash(node, source);
+                            let bod = structural_hash(b, source);
+                            content_hash(&format!("{}{}", sig, bod))
+                        }
+                        None => compute_structural_hash(node, source),
+                    };
+
+                    let entity = SemanticEntity {
+                        id: build_entity_id(file_path, entity_type, &name, parent_ref),
+                        file_path: file_path.to_string(),
+                        entity_type: entity_type.to_string(),
+                        name: name.clone(),
+                        parent_id: parent_ref.map(String::from),
+                        content_hash: content_hash(&content),
+                        structural_hash: Some(struct_hash),
+                        content,
+                        start_line,
+                        end_line,
+                        metadata: None,
+                    };
+
+                    let entity_id = entity.id.clone();
+                    entities.push(entity);
+
+                    // Visit children for nested entities (methods inside classes, etc.)
+                    let next_suppression = Some(node_type.to_string());
+                    let mut cursor = node.walk();
+                    for child in node.named_children(&mut cursor) {
+                        if config.container_node_types.contains(&child.kind()) {
+                            let mut inner_cursor = child.walk();
+                            let nested: Vec<_> = child.named_children(&mut inner_cursor).collect();
+                            for n in nested.into_iter().rev() {
+                                worklist.push((n, Some(entity_id.clone()), next_suppression.clone()));
+                            }
+                        }
+                    }
+
+                    // For variable declarations, also traverse into initializers
+                    // that are scope boundaries (arrow functions, function expressions)
+                    // so that inner class/function declarations are extracted.
+                    if node_type == "lexical_declaration" || node_type == "variable_declaration" {
+                        let mut vd_cursor = node.walk();
+                        for child in node.named_children(&mut vd_cursor) {
+                            if child.kind() == "variable_declarator" {
+                                if let Some(value) = child.child_by_field_name("value") {
+                                    if config.scope_boundary_types.contains(&value.kind()) {
+                                        worklist.push((
+                                            value,
+                                            Some(entity_id.clone()),
+                                            Some(value.kind().to_string()),
+                                        ));
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                return;
+                    continue;
+                }
             }
         }
-    }
 
-    // For export statements, look inside for the actual declaration
-    if node_type == "export_statement" {
-        if let Some(declaration) = node.child_by_field_name("declaration") {
-            visit_node(declaration, file_path, config, entities, parent_id, source, suppression_context);
-            return;
+        // For export statements, look inside for the actual declaration
+        if node_type == "export_statement" {
+            if let Some(declaration) = node.child_by_field_name("declaration") {
+                worklist.push((declaration, pid_owned, sup_owned));
+                continue;
+            }
         }
-    }
 
-    // Recurse into children. When we enter a scope boundary (e.g. arrow
-    // functions, function expressions) we propagate the boundary's node type
-    // as the suppression context so that suppressed_nested_entities rules
-    // filter out local variable declarations while still allowing inner
-    // class/function declarations to be extracted.
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        let child_enclosing = if config.scope_boundary_types.contains(&child.kind()) {
-            Some(child.kind())
-        } else {
-            suppression_context
-        };
-        visit_node(
-            child,
-            file_path,
-            config,
-            entities,
-            parent_id,
-            source,
-            child_enclosing,
-        );
+        // Visit all named children. When we enter a scope boundary (e.g. arrow
+        // functions, function expressions) we propagate the boundary's node type
+        // as the suppression context so that suppressed_nested_entities rules
+        // filter out local variable declarations while still allowing inner
+        // class/function declarations to be extracted.
+        // Children are pushed in reverse order so left-to-right processing is
+        // preserved when popping from the worklist.
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            let child_enclosing = if config.scope_boundary_types.contains(&child.kind()) {
+                Some(child.kind().to_string())
+            } else {
+                sup_owned.clone()
+            };
+            worklist.push((child, pid_owned.clone(), child_enclosing));
+        }
     }
 }
 
@@ -420,6 +410,13 @@ fn find_name_byte_range(node: Node, _source: &[u8]) -> Option<(usize, usize)> {
         }
     }
 
+    // Nix bindings: name is in the attrpath field
+    if node_type == "binding" {
+        if let Some(attrpath) = node.child_by_field_name("attrpath") {
+            return Some((attrpath.start_byte(), attrpath.end_byte()));
+        }
+    }
+
     // OCaml: individual binding nodes (used when compute_structural_hash is called
     // on a binding directly, e.g., from the multi-binding extraction in visit_node)
     if node_type == "let_binding" {
@@ -511,37 +508,37 @@ fn find_name_byte_range(node: Node, _source: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Find the byte range of the name within a C-style declarator chain.
-fn find_declarator_name_range(node: Node) -> Option<(usize, usize)> {
-    match node.kind() {
-        "identifier" | "type_identifier" | "field_identifier" => {
-            Some((node.start_byte(), node.end_byte()))
-        }
-        "qualified_identifier" | "scoped_identifier" => {
-            Some((node.start_byte(), node.end_byte()))
-        }
-        "pointer_declarator" | "function_declarator" | "array_declarator"
-        | "parenthesized_declarator" => {
-            if let Some(inner) = node.child_by_field_name("declarator") {
-                find_declarator_name_range(inner)
-            } else {
+fn find_declarator_name_range(mut node: Node) -> Option<(usize, usize)> {
+    loop {
+        match node.kind() {
+            "identifier" | "type_identifier" | "field_identifier" => {
+                return Some((node.start_byte(), node.end_byte()));
+            }
+            "qualified_identifier" | "scoped_identifier" => {
+                return Some((node.start_byte(), node.end_byte()));
+            }
+            "pointer_declarator" | "function_declarator" | "array_declarator"
+            | "parenthesized_declarator" => {
+                if let Some(inner) = node.child_by_field_name("declarator") {
+                    node = inner;
+                    continue;
+                }
                 let mut cursor = node.walk();
-                let result = node
+                return node
                     .named_children(&mut cursor)
                     .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
                     .map(|c| (c.start_byte(), c.end_byte()));
-                result
             }
-        }
-        _ => {
-            if let Some(name) = node.child_by_field_name("name") {
-                return Some((name.start_byte(), name.end_byte()));
+            _ => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    return Some((name.start_byte(), name.end_byte()));
+                }
+                let mut cursor = node.walk();
+                return node
+                    .named_children(&mut cursor)
+                    .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
+                    .map(|c| (c.start_byte(), c.end_byte()));
             }
-            let mut cursor = node.walk();
-            let result = node
-                .named_children(&mut cursor)
-                .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
-                .map(|c| (c.start_byte(), c.end_byte()));
-            result
         }
     }
 }
@@ -766,6 +763,26 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
         }
     }
 
+    // Nix bindings: name comes from attrpath field, which contains identifier children.
+    // Join multiple identifiers with dots for nested paths (e.g., "services.nginx.enable").
+    if node_type == "binding" {
+        if let Some(attrpath) = node.child_by_field_name("attrpath") {
+            let mut parts = Vec::new();
+            let mut cursor = attrpath.walk();
+            for child in attrpath.children(&mut cursor) {
+                if child.kind() == "identifier" || child.kind() == "string_expression" {
+                    if let Ok(text) = child.utf8_text(source) {
+                        parts.push(text.trim_matches('"').to_string());
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                return Some(parts.join("."));
+            }
+        }
+        return None;
+    }
+
     // For HCL blocks, combine block type with labels (e.g., resource.cloudflare_record.dns)
     if node_type == "block" {
         let mut parts = Vec::new();
@@ -857,38 +874,38 @@ fn should_skip_entity(
 }
 
 /// Extract the name from a C declarator (handles pointer_declarator, function_declarator, etc.)
-fn extract_declarator_name(node: Node, source: &[u8]) -> Option<String> {
-    match node.kind() {
-        "identifier" | "type_identifier" | "field_identifier" => Some(node_text(node, source).to_string()),
-        "qualified_identifier" | "scoped_identifier" => {
-            // For C++ qualified names like ClassName::method, return the full qualified name
-            Some(node_text(node, source).to_string())
-        }
-        "pointer_declarator"
-        | "function_declarator"
-        | "array_declarator"
-        | "parenthesized_declarator" => {
-            if let Some(inner) = node.child_by_field_name("declarator") {
-                extract_declarator_name(inner, source)
-            } else {
+fn extract_declarator_name(mut node: Node, source: &[u8]) -> Option<String> {
+    loop {
+        match node.kind() {
+            "identifier" | "type_identifier" | "field_identifier" => return Some(node_text(node, source).to_string()),
+            "qualified_identifier" | "scoped_identifier" => {
+                // For C++ qualified names like ClassName::method, return the full qualified name
+                return Some(node_text(node, source).to_string());
+            }
+            "pointer_declarator"
+            | "function_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator" => {
+                if let Some(inner) = node.child_by_field_name("declarator") {
+                    node = inner;
+                    continue;
+                }
                 let mut cursor = node.walk();
-                let result = node
+                return node
                     .named_children(&mut cursor)
                     .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
                     .map(|c| node_text(c, source).to_string());
-                result
             }
-        }
-        _ => {
-            if let Some(name) = node.child_by_field_name("name") {
-                return Some(node_text(name, source).to_string());
+            _ => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    return Some(node_text(name, source).to_string());
+                }
+                let mut cursor = node.walk();
+                return node
+                    .named_children(&mut cursor)
+                    .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
+                    .map(|c| node_text(c, source).to_string());
             }
-            let mut cursor = node.walk();
-            let result = node
-                .named_children(&mut cursor)
-                .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
-                .map(|c| node_text(c, source).to_string());
-            result
         }
     }
 }
@@ -923,6 +940,8 @@ fn map_node_type(tree_sitter_type: &str) -> &str {
         "export_statement" => "export",
         "lexical_declaration" | "variable_declaration" | "var_declaration" | "declaration" => "variable",
         "const_declaration" | "const_item" => "constant",
+        "binding" => "binding",
+        "inherit" | "inherit_from" => "inherit",
         "static_item" => "static",
         "value_specification" => "val",
         "module_type_definition" => "module_type",
@@ -994,25 +1013,27 @@ fn extract_call_entity(node: Node, config: &LanguageConfig, source: &[u8]) -> Op
 
 /// Extract function name from a def/defp/defmacro/defguard argument.
 /// Handles: call (fn with params), identifier (arity-0), binary_operator (defguard when clause)
-fn extract_fn_name_from_arg(node: Node, source: &[u8]) -> Option<String> {
-    match node.kind() {
-        "call" => {
-            if let Some(fn_target) = node.child_by_field_name("target") {
-                Some(node_text(fn_target, source).to_string())
-            } else {
-                let mut c = node.walk();
-                let id = node.named_children(&mut c)
-                    .find(|n| n.kind() == "identifier")?;
-                Some(node_text(id, source).to_string())
+fn extract_fn_name_from_arg(mut node: Node, source: &[u8]) -> Option<String> {
+    loop {
+        match node.kind() {
+            "call" => {
+                return if let Some(fn_target) = node.child_by_field_name("target") {
+                    Some(node_text(fn_target, source).to_string())
+                } else {
+                    let mut c = node.walk();
+                    let id = node.named_children(&mut c)
+                        .find(|n| n.kind() == "identifier")?;
+                    Some(node_text(id, source).to_string())
+                };
             }
+            "identifier" => return Some(node_text(node, source).to_string()),
+            "binary_operator" => {
+                // defguard is_positive(x) when ... -> left side has the actual call/identifier
+                node = node.child_by_field_name("left")?;
+                continue;
+            }
+            _ => return None,
         }
-        "identifier" => Some(node_text(node, source).to_string()),
-        "binary_operator" => {
-            // defguard is_positive(x) when ... -> left side has the actual call/identifier
-            let left = node.child_by_field_name("left")?;
-            extract_fn_name_from_arg(left, source)
-        }
-        _ => None,
     }
 }
 
@@ -1305,35 +1326,39 @@ fn extract_ocaml_let_binding_names(binding: Node, source: &[u8]) -> Vec<String> 
     names
 }
 
-fn collect_value_names(node: Node, source: &[u8], names: &mut Vec<String>) {
-    if node.kind() == "value_name" {
-        names.push(node_text(node, source).to_string());
-        return;
-    }
-    // Punned record field (`{ x; y }`) — field_pattern with no pattern field.
-    // The bound name is the field_name itself.
-    if node.kind() == "field_pattern" {
-        if let Some(pattern) = node.child_by_field_name("pattern") {
-            collect_value_names(pattern, source, names);
-        } else {
-            // Punned: extract the field_name from the field_path
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if child.kind() == "field_path" {
-                    let mut inner = child.walk();
-                    for fc in child.named_children(&mut inner) {
-                        if fc.kind() == "field_name" {
-                            names.push(node_text(fc, source).to_string());
+fn collect_value_names(root: Node, source: &[u8], names: &mut Vec<String>) {
+    let mut worklist = vec![root];
+    while let Some(node) = worklist.pop() {
+        if node.kind() == "value_name" {
+            names.push(node_text(node, source).to_string());
+            continue;
+        }
+        // Punned record field (`{ x; y }`) — field_pattern with no pattern field.
+        // The bound name is the field_name itself.
+        if node.kind() == "field_pattern" {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                worklist.push(pattern);
+            } else {
+                // Punned: extract the field_name from the field_path
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if child.kind() == "field_path" {
+                        let mut inner = child.walk();
+                        for fc in child.named_children(&mut inner) {
+                            if fc.kind() == "field_name" {
+                                names.push(node_text(fc, source).to_string());
+                            }
                         }
                     }
                 }
             }
+            continue;
         }
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_value_names(child, source, names);
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            worklist.push(child);
+        }
     }
 }
 

@@ -2,7 +2,6 @@ use std::path::Path;
 
 use colored::Colorize;
 use sem_core::parser::graph::EntityGraph;
-use sem_core::parser::plugins::create_default_registry;
 
 pub struct ImpactOptions {
     pub cwd: String,
@@ -25,7 +24,7 @@ pub enum ImpactMode {
 
 pub fn impact_command(opts: ImpactOptions) {
     let root = Path::new(&opts.cwd);
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
 
     let ext_filter = super::graph::normalize_exts(&opts.file_exts);
     let file_paths = super::graph::find_supported_files_public(root, &registry, &ext_filter);

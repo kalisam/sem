@@ -3,7 +3,6 @@ use std::path::Path;
 use colored::Colorize;
 use sem_core::git::bridge::GitBridge;
 use sem_core::model::entity::SemanticEntity;
-use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 
 use super::truncate_str;
@@ -65,7 +64,7 @@ struct LogEntry {
 
 pub fn log_command(opts: LogOptions) {
     let root = Path::new(&opts.cwd);
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
 
     let bridge = match GitBridge::open(root) {
         Ok(b) => b,
@@ -117,7 +116,9 @@ pub fn log_command(opts: LogOptions) {
 
     // Verify the file has a parser (read content for shebang detection on extensionless files)
     let file_content_hint = std::fs::read_to_string(root.join(&file_path)).unwrap_or_default();
-    if registry.get_plugin_with_content(&file_path, &file_content_hint).is_none() {
+    let resolved_fp = registry.resolve_file_path(&file_path);
+    let detection_fp = resolved_fp.as_deref().unwrap_or(&file_path);
+    if registry.get_plugin_with_content(detection_fp, &file_content_hint).is_none() {
         eprintln!(
             "{} Unsupported file type: {}",
             "error:".red().bold(),
@@ -177,8 +178,7 @@ pub fn log_command(opts: LogOptions) {
                 .flatten();
 
             let found_entity = file_content.as_ref().and_then(|c| {
-                let p = registry.get_plugin_with_content(&current_git_file, c)?;
-                let entities = p.extract_entities(c, &current_git_file);
+                let entities = registry.extract_entities(&current_git_file, c);
                 entities.into_iter().find(|e| e.name == opts.entity_name)
             });
 
@@ -524,11 +524,7 @@ fn search_entity_cross_file(
             Ok(Some(c)) => c,
             _ => continue,
         };
-        let plugin = match registry.get_plugin_with_content(file_path, &content) {
-            Some(p) => p,
-            None => continue,
-        };
-        let entities = plugin.extract_entities(&content, file_path);
+        let entities = registry.extract_entities(file_path, &content);
         if let Some(ent) = entities.into_iter().find(|e| e.name == entity_name) {
             return Some((file_path.clone(), ent));
         }
@@ -544,11 +540,7 @@ fn search_entity_cross_file(
             Ok(Some(c)) => c,
             _ => continue,
         };
-        let plugin = match registry.get_plugin_with_content(file_path, &content) {
-            Some(p) => p,
-            None => continue,
-        };
-        let entities = plugin.extract_entities(&content, file_path);
+        let entities = registry.extract_entities(file_path, &content);
         if let Some(ent) = entities
             .into_iter()
             .find(|e| e.structural_hash.as_deref() == Some(prev_hash))
@@ -582,12 +574,7 @@ fn find_entity_file(
             Err(_) => continue,
         };
 
-        let plugin = match registry.get_plugin_with_content(file_path, &content) {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let entities = plugin.extract_entities(&content, file_path);
+        let entities = registry.extract_entities(file_path, &content);
         if entities.iter().any(|e| e.name == entity_name) {
             found_in.push(file_path.clone());
         }

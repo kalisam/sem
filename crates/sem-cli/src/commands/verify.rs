@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use colored::Colorize;
-use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::verify::{find_arity_mismatches, find_broken_callers};
 
 pub struct VerifyOptions {
@@ -13,7 +12,7 @@ pub struct VerifyOptions {
 
 pub fn verify_command(opts: VerifyOptions) {
     let root = Path::new(&opts.cwd);
-    let registry = create_default_registry();
+    let registry = super::create_registry(&opts.cwd);
 
     let ext_filter = super::graph::normalize_exts(&opts.file_exts);
     let file_paths = super::graph::find_supported_files_public(root, &registry, &ext_filter);
@@ -184,10 +183,7 @@ fn get_head_entities(
         }
 
         let content = String::from_utf8_lossy(&output.stdout).to_string();
-        if let Some(plugin) = registry.get_plugin_with_content(fp, &content) {
-            let entities = plugin.extract_entities(&content, fp);
-            all_entities.extend(entities);
-        }
+        all_entities.extend(registry.extract_entities(fp, &content));
     }
 
     if all_entities.is_empty() {

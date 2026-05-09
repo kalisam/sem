@@ -56,11 +56,7 @@ pub fn verify_contracts(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let plugin = match registry.get_plugin_with_content(fp, &content) {
-            Some(p) => p,
-            None => continue,
-        };
-        for entity in plugin.extract_entities(&content, fp) {
+        for entity in registry.extract_entities(fp, &content) {
             content_map.insert(entity.id.clone(), entity.content.clone());
         }
     }
@@ -326,23 +322,25 @@ fn extract_param_info_from_node(
     })
 }
 
-fn find_first_function(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
-    let kind = node.kind();
-    if matches!(
-        kind,
-        "function_definition"
-            | "function_item"
-            | "function_declaration"
-            | "method_definition"
-            | "method_declaration"
-            | "arrow_function"
-    ) {
-        return Some(node);
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(f) = find_first_function(child) {
-            return Some(f);
+fn find_first_function(root: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut worklist = vec![root];
+    while let Some(node) = worklist.pop() {
+        let kind = node.kind();
+        if matches!(
+            kind,
+            "function_definition"
+                | "function_item"
+                | "function_declaration"
+                | "method_definition"
+                | "method_declaration"
+                | "arrow_function"
+        ) {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            worklist.push(child);
         }
     }
     None
@@ -366,51 +364,55 @@ pub fn count_call_args_ts(
 }
 
 fn find_call_arg_count(
-    node: tree_sitter::Node,
+    root: tree_sitter::Node,
     source: &[u8],
     callee_name: &str,
 ) -> Option<usize> {
-    let kind = node.kind();
+    let mut worklist = vec![root];
+    while let Some(node) = worklist.pop() {
+        let kind = node.kind();
 
-    if kind == "call" || kind == "call_expression" {
-        let func = node.child_by_field_name("function")?;
-        let func_name = match func.kind() {
-            "identifier" => func.utf8_text(source).unwrap_or(""),
-            "attribute" | "member_expression" | "field_expression" => func
-                .child_by_field_name("attribute")
-                .or_else(|| func.child_by_field_name("property"))
-                .or_else(|| func.child_by_field_name("field"))
-                .and_then(|n| n.utf8_text(source).ok())
-                .unwrap_or(""),
-            "selector_expression" => func
-                .child_by_field_name("field")
-                .and_then(|n| n.utf8_text(source).ok())
-                .unwrap_or(""),
-            "scoped_identifier" => {
-                let text = func.utf8_text(source).unwrap_or("");
-                text.rsplit("::").next().unwrap_or("")
-            }
-            _ => "",
-        };
+        if kind == "call" || kind == "call_expression" {
+            if let Some(func) = node.child_by_field_name("function") {
+                let func_name = match func.kind() {
+                    "identifier" => func.utf8_text(source).unwrap_or(""),
+                    "attribute" | "member_expression" | "field_expression" => func
+                        .child_by_field_name("attribute")
+                        .or_else(|| func.child_by_field_name("property"))
+                        .or_else(|| func.child_by_field_name("field"))
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .unwrap_or(""),
+                    "selector_expression" => func
+                        .child_by_field_name("field")
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .unwrap_or(""),
+                    "scoped_identifier" => {
+                        let text = func.utf8_text(source).unwrap_or("");
+                        text.rsplit("::").next().unwrap_or("")
+                    }
+                    _ => "",
+                };
 
-        if func_name == callee_name {
-            let args = node.child_by_field_name("arguments")?;
-            let mut count = 0;
-            let mut cursor = args.walk();
-            for child in args.named_children(&mut cursor) {
-                // Skip comment nodes
-                if !child.kind().contains("comment") {
-                    count += 1;
+                if func_name == callee_name {
+                    if let Some(args) = node.child_by_field_name("arguments") {
+                        let mut count = 0;
+                        let mut cursor = args.walk();
+                        for child in args.named_children(&mut cursor) {
+                            // Skip comment nodes
+                            if !child.kind().contains("comment") {
+                                count += 1;
+                            }
+                        }
+                        return Some(count);
+                    }
                 }
             }
-            return Some(count);
         }
-    }
 
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(count) = find_call_arg_count(child, source, callee_name) {
-            return Some(count);
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            worklist.push(child);
         }
     }
     None

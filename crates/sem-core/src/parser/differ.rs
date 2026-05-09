@@ -35,12 +35,16 @@ pub fn compute_semantic_diff(
             let content_hint = file.after_content.as_deref()
                 .or(file.before_content.as_deref())
                 .unwrap_or("");
-            let plugin = registry.get_plugin_with_content(&file.file_path, content_hint)?;
+            let resolved = registry.resolve_file_path(&file.file_path);
+            let detection_path = resolved.as_deref().unwrap_or(&file.file_path);
+            let plugin = registry.get_plugin_with_content(detection_path, content_hint)?;
 
             let before_entities = if let Some(ref content) = file.before_content {
                 let before_path = file.old_file_path.as_deref().unwrap_or(&file.file_path);
+                let before_resolved = registry.resolve_file_path(before_path);
+                let before_detection = before_resolved.as_deref().unwrap_or(before_path);
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    plugin.extract_entities(content, before_path)
+                    plugin.extract_entities(content, before_detection)
                 })) {
                     Ok(entities) => entities,
                     Err(_) => Vec::new(),
@@ -51,7 +55,7 @@ pub fn compute_semantic_diff(
 
             let after_entities = if let Some(ref content) = file.after_content {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    plugin.extract_entities(content, &file.file_path)
+                    plugin.extract_entities(content, detection_path)
                 })) {
                     Ok(entities) => entities,
                     Err(_) => Vec::new(),

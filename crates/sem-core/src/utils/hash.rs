@@ -35,38 +35,42 @@ pub fn structural_hash_excluding_range(
     format!("{:016x}", hasher.finish())
 }
 
-/// Recursively hash tokens from the AST, skipping comments.
+/// Iteratively hash tokens from the AST, skipping comments.
 /// Hashes both node types (structure) and leaf text (content) so that
 /// structurally different ASTs with identical leaf tokens produce different hashes.
 /// Zero allocations: hashes directly from source byte slices.
-fn hash_structural_tokens(node: Node, source: &[u8], hasher: &mut Xxh3) {
-    let kind = node.kind();
+fn hash_structural_tokens(root: Node, source: &[u8], hasher: &mut Xxh3) {
+    let mut worklist = vec![root];
+    while let Some(node) = worklist.pop() {
+        let kind = node.kind();
 
-    if is_comment_node(kind) {
-        return;
-    }
-
-    if node.child_count() == 0 {
-        // Leaf node: hash its text directly from the source buffer
-        let start = node.start_byte();
-        let end = node.end_byte();
-        if start < end && end <= source.len() {
-            let bytes = &source[start..end];
-            // Trim whitespace manually to avoid allocation
-            let trimmed = trim_bytes(bytes);
-            if !trimmed.is_empty() {
-                hasher.write(trimmed);
-                hasher.write(b" ");
-            }
+        if is_comment_node(kind) {
+            continue;
         }
-    } else {
-        // Hash the node type to capture structure, not just leaf content.
-        // e.g. `x = foo(bar)` vs `foo(bar) = x` have same leaves but different structure.
-        hasher.write(kind.as_bytes());
-        hasher.write(b":");
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            hash_structural_tokens(child, source, hasher);
+
+        if node.child_count() == 0 {
+            // Leaf node: hash its text directly from the source buffer
+            let start = node.start_byte();
+            let end = node.end_byte();
+            if start < end && end <= source.len() {
+                let bytes = &source[start..end];
+                // Trim whitespace manually to avoid allocation
+                let trimmed = trim_bytes(bytes);
+                if !trimmed.is_empty() {
+                    hasher.write(trimmed);
+                    hasher.write(b" ");
+                }
+            }
+        } else {
+            // Hash the node type to capture structure, not just leaf content.
+            // e.g. `x = foo(bar)` vs `foo(bar) = x` have same leaves but different structure.
+            hasher.write(kind.as_bytes());
+            hasher.write(b":");
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            for child in children.into_iter().rev() {
+                worklist.push(child);
+            }
         }
     }
 }
@@ -74,39 +78,43 @@ fn hash_structural_tokens(node: Node, source: &[u8], hasher: &mut Xxh3) {
 /// Like `hash_structural_tokens` but skips any leaf node whose byte range
 /// overlaps the excluded range (the entity name).
 fn hash_structural_tokens_excluding(
-    node: Node,
+    root: Node,
     source: &[u8],
     hasher: &mut Xxh3,
     exclude_start: usize,
     exclude_end: usize,
 ) {
-    let kind = node.kind();
+    let mut worklist = vec![root];
+    while let Some(node) = worklist.pop() {
+        let kind = node.kind();
 
-    if is_comment_node(kind) {
-        return;
-    }
-
-    if node.child_count() == 0 {
-        let start = node.start_byte();
-        let end = node.end_byte();
-        // Skip leaf nodes that overlap the excluded range
-        if start < exclude_end && end > exclude_start {
-            return;
+        if is_comment_node(kind) {
+            continue;
         }
-        if start < end && end <= source.len() {
-            let bytes = &source[start..end];
-            let trimmed = trim_bytes(bytes);
-            if !trimmed.is_empty() {
-                hasher.write(trimmed);
-                hasher.write(b" ");
+
+        if node.child_count() == 0 {
+            let start = node.start_byte();
+            let end = node.end_byte();
+            // Skip leaf nodes that overlap the excluded range
+            if start < exclude_end && end > exclude_start {
+                continue;
             }
-        }
-    } else {
-        hasher.write(kind.as_bytes());
-        hasher.write(b":");
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            hash_structural_tokens_excluding(child, source, hasher, exclude_start, exclude_end);
+            if start < end && end <= source.len() {
+                let bytes = &source[start..end];
+                let trimmed = trim_bytes(bytes);
+                if !trimmed.is_empty() {
+                    hasher.write(trimmed);
+                    hasher.write(b" ");
+                }
+            }
+        } else {
+            hasher.write(kind.as_bytes());
+            hasher.write(b":");
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            for child in children.into_iter().rev() {
+                worklist.push(child);
+            }
         }
     }
 }

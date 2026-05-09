@@ -1316,7 +1316,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sem-cli"
-version = "0.4.1"
+version = "0.5.3"
 dependencies = [
  "clap",
  "clap_complete_command",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.4.1"
+version = "0.5.3"
 dependencies = [
  "git2",
  "rayon",
@@ -1359,6 +1359,7 @@ dependencies = [
  "tree-sitter-java",
  "tree-sitter-javascript",
  "tree-sitter-kotlin-ng",
+ "tree-sitter-nix",
  "tree-sitter-ocaml",
  "tree-sitter-perl-next",
  "tree-sitter-php",
@@ -1375,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "sem-mcp"
-version = "0.4.1"
+version = "0.5.3"
 dependencies = [
  "git2",
  "lru",
@@ -1921,6 +1922,16 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-nix"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4952a9733f3a98f6683a0ccd1035d84ab7a52f7e84eeed58548d86765ad92de3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-ocaml"
