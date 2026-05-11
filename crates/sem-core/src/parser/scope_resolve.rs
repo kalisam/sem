@@ -41,8 +41,6 @@ pub struct Scope {
 
 /// Reference found in the AST
 struct AstRef {
-    /// The entity this reference is inside of
-    from_entity_id: String,
     /// Kind of reference
     kind: AstRefKind,
 }
@@ -52,10 +50,6 @@ enum AstRefKind {
     Call(String),
     /// Attribute call: `x.method()`
     MethodCall { receiver: String, method: String },
-    /// Bare name reference: `Foo` (type annotation, class instantiation)
-    Name(String),
-    /// Attribute access: `x.field`
-    Attribute { receiver: String, attr: String },
 }
 
 /// Result of scope-aware resolution
@@ -388,8 +382,6 @@ fn ref_description(ast_ref: &AstRef) -> String {
     match &ast_ref.kind {
         AstRefKind::Call(name) => format!("{}()", name),
         AstRefKind::MethodCall { receiver, method } => format!("{}.{}()", receiver, method),
-        AstRefKind::Name(name) => name.clone(),
-        AstRefKind::Attribute { receiver, attr } => format!("{}.{}", receiver, attr),
     }
 }
 
@@ -1200,9 +1192,9 @@ fn find_return_constructor(root: tree_sitter::Node, source: &[u8]) -> Option<Str
 /// struct field declarations (Rust/Go).
 fn scan_init_self_attrs(
     root: tree_sitter::Node,
-    file_path: &str,
-    all_entities: &[SemanticEntity],
-    entity_map: &HashMap<String, EntityInfo>,
+    _file_path: &str,
+    _all_entities: &[SemanticEntity],
+    _entity_map: &HashMap<String, EntityInfo>,
     source: &[u8],
     instance_attr_types: &mut HashMap<(String, String), String>,
     init_params_map: &mut HashMap<String, Vec<String>>,
@@ -1648,7 +1640,7 @@ fn infer_constructor_param_types(
     return_type_map: &HashMap<String, String>,
     init_params: &HashMap<String, Vec<String>>,
     attr_to_param: &HashMap<(String, String), String>,
-    symbol_table: &HashMap<String, Vec<String>>,
+    _symbol_table: &HashMap<String, Vec<String>>,
     entity_map: &HashMap<String, EntityInfo>,
     instance_attr_types: &mut HashMap<(String, String), String>,
 ) {
@@ -2243,13 +2235,11 @@ fn collect_refs_in_range(
                             // Strip trailing dots/operators
                             let receiver = receiver.trim_end_matches('.').to_string();
                             refs.push(AstRef {
-                                from_entity_id: entity_id.to_string(),
                                 kind: AstRefKind::MethodCall { receiver, method: method_name.to_string() },
                             });
                         } else {
                             // Bare call (no object)
                             refs.push(AstRef {
-                                from_entity_id: entity_id.to_string(),
                                 kind: AstRefKind::Call(method_name.to_string()),
                             });
                         }
@@ -2274,7 +2264,6 @@ fn collect_refs_in_range(
                 let name = name.rsplit('.').next().unwrap_or(name);
                 if !name.is_empty() && name != entity_name && !is_builtin(name, config) {
                     refs.push(AstRef {
-                        from_entity_id: entity_id.to_string(),
                         kind: AstRefKind::Call(name.to_string()),
                     });
                 }
@@ -2296,7 +2285,6 @@ fn collect_refs_in_range(
                     && !is_builtin(name, config)
                 {
                     refs.push(AstRef {
-                        from_entity_id: entity_id.to_string(),
                         kind: AstRefKind::Call(name.to_string()),
                     });
                 }
@@ -2315,7 +2303,7 @@ fn collect_refs_in_range(
 /// Extract a call reference from a function/callee node (shared across languages)
 fn extract_call_ref(
     func: tree_sitter::Node,
-    entity_id: &str,
+    _entity_id: &str,
     entity_name: &str,
     source: &[u8],
     refs: &mut Vec<AstRef>,
@@ -2327,7 +2315,6 @@ fn extract_call_ref(
         let name = func.utf8_text(source).unwrap_or("");
         if !name.is_empty() && name != entity_name && !is_builtin(name, config) {
             refs.push(AstRef {
-                from_entity_id: entity_id.to_string(),
                 kind: AstRefKind::Call(name.to_string()),
             });
         }
@@ -2337,7 +2324,7 @@ fn extract_call_ref(
     // Check config member_access patterns
     for ma in config.member_access {
         if func_kind == ma.node_kind {
-            extract_member_call_ref(func, ma.object_field, ma.property_field, entity_id, source, refs);
+            extract_member_call_ref(func, ma.object_field, ma.property_field, source, refs);
             return;
         }
     }
@@ -2351,14 +2338,12 @@ fn extract_call_ref(
             let method_name = parts[parts.len() - 1];
             if !type_name.is_empty() && !method_name.is_empty() {
                 refs.push(AstRef {
-                    from_entity_id: entity_id.to_string(),
                     kind: AstRefKind::Call(method_name.to_string()),
                 });
                 if type_name.chars().next().map_or(false, |c| c.is_uppercase())
                     && !is_builtin(type_name, config)
                 {
                     refs.push(AstRef {
-                        from_entity_id: entity_id.to_string(),
                         kind: AstRefKind::Call(type_name.to_string()),
                     });
                 }
@@ -2372,7 +2357,6 @@ fn extract_member_call_ref(
     node: tree_sitter::Node,
     object_field: &str,
     attr_field: &str,
-    entity_id: &str,
     source: &[u8],
     refs: &mut Vec<AstRef>,
 ) {
@@ -2385,13 +2369,12 @@ fn extract_member_call_ref(
         .and_then(|n| n.utf8_text(source).ok())
         .unwrap_or("");
     if !obj.is_empty() && !attr.is_empty() {
-        push_method_call_ref(obj, attr, entity_id, refs);
+        push_method_call_ref(obj, attr, refs);
     }
 }
 
-fn push_method_call_ref(obj: &str, method: &str, entity_id: &str, refs: &mut Vec<AstRef>) {
+fn push_method_call_ref(obj: &str, method: &str, refs: &mut Vec<AstRef>) {
     refs.push(AstRef {
-        from_entity_id: entity_id.to_string(),
         kind: AstRefKind::MethodCall {
             receiver: obj.to_string(),
             method: method.to_string(),
@@ -2548,29 +2531,6 @@ fn resolve_ref(
                 return Some((target_id.clone(), RefType::Calls, "import"));
             }
 
-            None
-        }
-
-        AstRefKind::Name(name) => {
-            if let Some(eid) = lookup_scope_chain(scope_idx, scopes, name) {
-                return Some((eid, RefType::TypeRef, "scope_chain"));
-            }
-            let key = (file_path.to_string(), name.clone());
-            if let Some(target_id) = import_table.get(&key) {
-                return Some((target_id.clone(), RefType::Imports, "import"));
-            }
-            None
-        }
-
-        AstRefKind::Attribute { receiver, attr } => {
-            let receiver_type = lookup_type_in_scopes(scope_idx, scopes, receiver);
-            if let Some(class_name) = receiver_type {
-                if let Some(members) = class_members.get(class_name.as_str()) {
-                    if let Some((_, mid)) = members.iter().find(|(n, _)| n == attr) {
-                        return Some((mid.clone(), RefType::Calls, "type_tracking"));
-                    }
-                }
-            }
             None
         }
     }
