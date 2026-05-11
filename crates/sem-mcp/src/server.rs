@@ -233,24 +233,6 @@ impl SemServer {
             .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", entity_name)))
     }
 
-    /// Extract all entities from all supported files in parallel.
-    fn extract_all_entities(
-        root: &Path,
-        file_paths: &[String],
-        registry: &ParserRegistry,
-    ) -> Vec<SemanticEntity> {
-        file_paths
-            .iter()
-            .filter_map(|fp| {
-                let full = root.join(fp);
-                let content = std::fs::read_to_string(&full).ok()?;
-                let plugin = registry.get_plugin(fp)?;
-                Some(plugin.extract_entities(&content, fp))
-            })
-            .flatten()
-            .collect()
-    }
-
     /// Get cached graph or build a new one. Checks: memory cache -> SQLite cache -> fresh build.
     async fn get_or_build_graph(
         &self,
