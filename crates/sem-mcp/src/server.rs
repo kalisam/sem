@@ -49,7 +49,7 @@ pub struct SemServer {
     registry: Arc<ParserRegistry>,
     entity_cache: Arc<Mutex<EntityCache>>,
     graph_cache: Arc<Mutex<Option<CachedGraph>>>,
-    tool_router: ToolRouter<Self>,
+    _tool_router: ToolRouter<Self>,
 }
 
 impl SemServer {
@@ -332,7 +332,7 @@ impl SemServer {
                 std::num::NonZeroUsize::new(500).unwrap(),
             ))),
             graph_cache: Arc::new(Mutex::new(None)),
-            tool_router: Self::tool_router(),
+            _tool_router: Self::tool_router(),
         }
     }
 
