@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
+use rayon::prelude::*;
 
+use crate::model::entity::SemanticEntity;
 use super::plugin::SemanticParserPlugin;
 
 pub struct ParserRegistry {
@@ -198,7 +200,7 @@ impl ParserRegistry {
     /// Extract entities, transparently handling custom extension mappings.
     /// Uses the resolved path for language detection but restores the original
     /// file path in entity metadata (file_path, id, parent_id).
-    pub fn extract_entities(&self, file_path: &str, content: &str) -> Vec<crate::model::entity::SemanticEntity> {
+    pub fn extract_entities(&self, file_path: &str, content: &str) -> Vec<SemanticEntity> {
         let resolved = self.resolve_file_path(file_path);
         let detection_path = resolved.as_deref().unwrap_or(file_path);
 
@@ -219,7 +221,7 @@ impl ParserRegistry {
         &self,
         file_path: &str,
         content: &str,
-    ) -> Option<(Vec<crate::model::entity::SemanticEntity>, Option<tree_sitter::Tree>)> {
+    ) -> Option<(Vec<SemanticEntity>, Option<tree_sitter::Tree>)> {
         let resolved = self.resolve_file_path(file_path);
         let detection_path = resolved.as_deref().unwrap_or(file_path);
 
@@ -230,10 +232,29 @@ impl ParserRegistry {
         }
         Some((entities, tree))
     }
+
+    /// Extract entities from multiple files in parallel.
+    pub fn extract_all_entities(
+        &self,
+        root: &Path,
+        file_paths: &[String],
+    ) -> Vec<SemanticEntity> {
+        file_paths
+            .par_iter()
+            .flat_map(|fp| {
+                let full = root.join(fp);
+                let content = match std::fs::read_to_string(&full) {
+                    Ok(c) => c,
+                    Err(_) => return Vec::new(),
+                };
+                self.extract_entities(fp, &content)
+            })
+            .collect()
+    }
 }
 
 /// Restore original file path in entities when a custom extension mapping was used.
-fn fix_entity_paths(entities: &mut [crate::model::entity::SemanticEntity], original: &str, resolved: &str) {
+fn fix_entity_paths(entities: &mut [SemanticEntity], original: &str, resolved: &str) {
     for entity in entities {
         entity.file_path = original.to_string();
         entity.id = entity.id.replace(resolved, original);
